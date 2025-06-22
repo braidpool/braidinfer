@@ -9,13 +9,40 @@ import shutil
 import os
 from pathlib import Path
 from io import StringIO
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, Mock
 from transformers import AutoTokenizer
 from nanovllm import LLM, SamplingParams
 from nanovllm.engine.context_manager import ContextManager
 from cli import handle_slash_command
+from rich.console import Console
 
 
+class MockConsole:
+    """Mock console to capture rich output."""
+    def __init__(self):
+        self.output = []
+    
+    def print(self, *args, **kwargs):
+        # Convert rich markup to plain text for testing
+        for arg in args:
+            # Handle Rich Table objects
+            if hasattr(arg, '__rich__') or hasattr(arg, '_rows'):
+                # For tables, we'll just add a simple representation
+                text = str(type(arg).__name__).lower()
+                if hasattr(arg, 'title') and arg.title:
+                    text = str(arg.title).lower()
+            else:
+                text = str(arg)
+                # Simple removal of rich markup
+                import re
+                text = re.sub(r'\[/?[^\]]+\]', '', text)
+            self.output.append(text)
+    
+    def get_output(self):
+        return '\n'.join(self.output)
+    
+    def clear(self):
+        self.output = []
 
 
 # Global test fixtures
@@ -31,6 +58,10 @@ class TestCLICommands(unittest.TestCase):
     def setUpClass(cls):
         """Set up test fixtures once for all tests."""
         cls.model_path = Path.home() / "huggingface" / "Qwen3-0.6B"
+        
+        # Set different port to avoid conflicts
+        import os
+        os.environ["MASTER_PORT"] = "2335"
         
         # Initialize fixtures if not already done (for individual test runs)
         global _test_llm, _test_tokenizer, _test_context_mgr
@@ -78,11 +109,16 @@ class TestCLICommands(unittest.TestCase):
         if hasattr(self, 'temp_dir'):
             shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    @patch('builtins.print')
-    def test_load_command(self, mock_print):
+    def test_load_command(self):
         """Test /load command."""
+
+        # Create mock console
+
+        mock_console = MockConsole()
+
+        
         # Test successful load
-        handle_slash_command("load", str(self.test_file), self.context_mgr, self.tokenizer)
+        handle_slash_command("load", str(self.test_file), self.context_mgr, self.tokenizer, console=mock_console)
 
         # Verify chunk was created
         self.assertEqual(len(self.context_mgr.chunks), 1)
@@ -91,247 +127,336 @@ class TestCLICommands(unittest.TestCase):
         self.assertEqual(chunk.metadata["source"], str(self.test_file))
 
         # Verify success message was printed
-        mock_print.assert_any_call("✓ Added chunk:")
+        self.assertIn("✓ Added chunk:", mock_console.get_output())
 
-    @patch('builtins.print')
-    def test_load_command_nonexistent_file(self, mock_print):
+    def test_load_command_nonexistent_file(self):
         """Test /load command with nonexistent file."""
-        handle_slash_command("load", "/nonexistent/file.txt", self.context_mgr, self.tokenizer)
+
+        # Create mock console
+
+        mock_console = MockConsole()
+
+        
+        handle_slash_command("load", "/nonexistent/file.txt", self.context_mgr, self.tokenizer, console=mock_console)
 
         # Verify no chunks were created
         self.assertEqual(len(self.context_mgr.chunks), 0)
 
         # Verify error message was printed
-        mock_print.assert_any_call("File not found: /nonexistent/file.txt")
+        self.assertIn("File not found: /nonexistent/file.txt", mock_console.get_output())
 
-    @patch('builtins.print')
-    def test_load_command_no_args(self, mock_print):
+    def test_load_command_no_args(self):
         """Test /load command without arguments."""
-        handle_slash_command("load", "", self.context_mgr, self.tokenizer)
+
+        # Create mock console
+
+        mock_console = MockConsole()
+
+        
+        handle_slash_command("load", "", self.context_mgr, self.tokenizer, console=mock_console)
 
         # Verify usage message was printed
-        mock_print.assert_any_call("Usage: /load <filename>")
+        self.assertIn("Usage: /load <filename>", mock_console.get_output())
 
-    @patch('builtins.print')
-    def test_context_command(self, mock_print):
+    def test_context_command(self):
         """Test /context command."""
+
+        # Create mock console
+
+        mock_console = MockConsole()
+
+        
         # Add some test chunks
         chunk1 = self.context_mgr.add_chunk("First chunk", self.tokenizer)
         chunk2 = self.context_mgr.add_chunk("Second chunk", self.tokenizer)
         self.context_mgr.deactivate_chunk(chunk2.sha256)
 
         # Test context command
-        handle_slash_command("context", "", self.context_mgr, self.tokenizer)
+        handle_slash_command("context", "", self.context_mgr, self.tokenizer, console=mock_console)
 
         # Verify output contains relevant information (check if any call contains expected strings)
-        printed_output = "".join(str(call) for call in mock_print.call_args_list)
-        self.assertIn("active", printed_output.lower())
-        self.assertIn("inactive", printed_output.lower())
+        output = mock_console.get_output()
+        # Should see the table, memory stats, and chunk information
+        self.assertIn("memory usage", output.lower())
+        self.assertIn("token summary", output.lower())
+        # One chunk is active, one is inactive - we should see both in summary
+        self.assertIn("active tokens", output.lower())
 
-    @patch('builtins.print')
-    def test_activate_command(self, mock_print):
+    def test_activate_command(self):
         """Test /activate command."""
+
+        # Create mock console
+
+        mock_console = MockConsole()
+
+        
         # Add and deactivate a chunk
         chunk = self.context_mgr.add_chunk("Test chunk", self.tokenizer)
         self.context_mgr.deactivate_chunk(chunk.sha256)
-
+        
         # Test activation
-        handle_slash_command("activate", chunk.sha256[:8], self.context_mgr, self.tokenizer)
+        handle_slash_command("activate", chunk.sha256[:8], self.context_mgr, self.tokenizer, console=mock_console)
 
         # Verify chunk is active
         self.assertIn(chunk.sha256, self.context_mgr.active_chunks)
 
         # Verify success message
-        mock_print.assert_any_call(f"✓ Chunk activated: {chunk.sha256[:8]}...")
+        output = mock_console.get_output()
+        self.assertIn(f"✓ Chunk activated: {chunk.sha256[:8]}...", output)
 
-    @patch('builtins.print')
-    def test_activate_command_invalid_hash(self, mock_print):
+    def test_activate_command_invalid_hash(self):
         """Test /activate command with invalid hash."""
-        handle_slash_command("activate", "invalid_hash", self.context_mgr, self.tokenizer)
+
+        # Create mock console
+
+        mock_console = MockConsole()
+
+        
+        handle_slash_command("activate", "invalid_hash", self.context_mgr, self.tokenizer, console=mock_console)
 
         # Verify error message
-        args_list = [str(call) for call in mock_print.call_args_list]
-        error_messages = [arg for arg in args_list if "Failed to activate chunk" in arg]
+        output = mock_console.get_output()
+        error_messages = [line for line in output.split("\n") if "Failed to activate chunk" in line]
         self.assertTrue(len(error_messages) > 0)
 
-    @patch('builtins.print')
-    def test_deactivate_command(self, mock_print):
+    def test_deactivate_command(self):
         """Test /deactivate command."""
+
+        # Create mock console
+
+        mock_console = MockConsole()
+
+        
         # Add a chunk
         chunk = self.context_mgr.add_chunk("Test chunk", self.tokenizer)
 
         # Test deactivation
-        handle_slash_command("deactivate", chunk.sha256[:8], self.context_mgr, self.tokenizer)
+        handle_slash_command("deactivate", chunk.sha256[:8], self.context_mgr, self.tokenizer, console=mock_console)
 
         # Verify chunk is inactive
         self.assertNotIn(chunk.sha256, self.context_mgr.active_chunks)
 
         # Verify success message
-        mock_print.assert_any_call(f"✓ Chunk deactivated: {chunk.sha256[:8]}...")
+        self.assertIn(f"✓ Chunk deactivated: {chunk.sha256[:8]}...", mock_console.get_output())
 
-    @patch('builtins.print')
-    def test_populate_command(self, mock_print):
+    def test_populate_command(self):
         """Test /populate command."""
+
+        # Create mock console
+
+        mock_console = MockConsole()
+
+        
         # Add a chunk without cache population
         chunk = self.context_mgr.add_chunk("Test chunk", self.tokenizer, populate_cache=False)
 
         # Test populate command
-        handle_slash_command("populate", chunk.sha256[:8], self.context_mgr, self.tokenizer)
+        handle_slash_command("populate", chunk.sha256[:8], self.context_mgr, self.tokenizer, console=mock_console)
 
         # Verify cache is populated
         self.assertTrue(chunk.cache_populated)
 
         # Verify success message
-        mock_print.assert_any_call(f"✓ Populated KV cache for chunk {chunk.sha256[:8]}...")
+        self.assertIn(f"✓ Populated KV cache for chunk {chunk.sha256[:8]}...", mock_console.get_output())
 
-    @patch('builtins.print')
-    def test_compose_command(self, mock_print):
+    def test_compose_command(self):
         """Test /compose command."""
+
+        # Create mock console
+
+        mock_console = MockConsole()
+
+        
         # Add chunks
         chunk1 = self.context_mgr.add_chunk("First chunk", self.tokenizer)
         chunk2 = self.context_mgr.add_chunk("Second chunk", self.tokenizer)
 
         # Test compose command
         args = f"{chunk1.sha256[:8]} {chunk2.sha256[:8]}"
-        handle_slash_command("compose", args, self.context_mgr, self.tokenizer)
+        handle_slash_command("compose", args, self.context_mgr, self.tokenizer, console=mock_console)
 
         # Verify composed chunk was created (should have 3 chunks total now)
         self.assertEqual(len(self.context_mgr.chunks), 3)
 
         # Verify success message
-        mock_print.assert_any_call("✓ Composed new chunk:")
+        self.assertIn("✓ Composed new chunk:", mock_console.get_output())
 
-    @patch('builtins.print')
-    def test_compose_command_insufficient_chunks(self, mock_print):
+    def test_compose_command_insufficient_chunks(self):
         """Test /compose command with insufficient chunks."""
+
+        # Create mock console
+
+        mock_console = MockConsole()
+
+        
         chunk = self.context_mgr.add_chunk("Single chunk", self.tokenizer)
 
         # Test compose with only one chunk
-        handle_slash_command("compose", chunk.sha256[:8], self.context_mgr, self.tokenizer)
+        handle_slash_command("compose", chunk.sha256[:8], self.context_mgr, self.tokenizer, console=mock_console)
 
         # Verify error message
-        mock_print.assert_any_call("Please provide at least 2 chunk hashes to compose")
+        self.assertIn("Please provide at least 2 chunk hashes to compose", mock_console.get_output())
 
-    @patch('builtins.print')
-    def test_tag_command(self, mock_print):
+    def test_tag_command(self):
         """Test /tag command."""
+
+        # Create mock console
+
+        mock_console = MockConsole()
+
+        
         # Add a chunk
         chunk = self.context_mgr.add_chunk("Test chunk", self.tokenizer)
 
         # Test tag command
         args = f"{chunk.sha256[:8]} test-tag"
-        handle_slash_command("tag", args, self.context_mgr, self.tokenizer)
+        handle_slash_command("tag", args, self.context_mgr, self.tokenizer, console=mock_console)
 
         # Verify tag was added
         self.assertIn("tags", chunk.metadata)
         self.assertIn("test-tag", chunk.metadata["tags"])
 
         # Verify success message
-        mock_print.assert_any_call(f"✓ Tagged chunk {chunk.sha256[:8]}... with 'test-tag'")
+        self.assertIn(f"✓ Tagged chunk {chunk.sha256[:8]}... with 'test-tag'", mock_console.get_output())
 
-    @patch('builtins.print')
-    def test_save_command(self, mock_print):
+    def test_save_command(self):
         """Test /save command."""
+
+        # Create mock console
+
+        mock_console = MockConsole()
+
+        
         # Add a chunk
         chunk = self.context_mgr.add_chunk("Test chunk", self.tokenizer)
 
         # Test save command
-        handle_slash_command("save", chunk.sha256[:8], self.context_mgr, self.tokenizer)
+        handle_slash_command("save", chunk.sha256[:8], self.context_mgr, self.tokenizer, console=mock_console)
 
         # Verify file was created
         save_path = Path(self.temp_dir) / f"{chunk.sha256}.pkl"
         self.assertTrue(save_path.exists())
 
         # Verify success message
-        mock_print.assert_any_call(f"✓ Chunk saved: {chunk.sha256[:8]}...")
+        self.assertIn(f"✓ Chunk saved: {chunk.sha256[:8]}...", mock_console.get_output())
 
-    @patch('builtins.print')
-    def test_unload_command(self, mock_print):
+    def test_unload_command(self):
         """Test /unload command."""
+
+        # Create mock console
+
+        mock_console = MockConsole()
+
+        
         # Add a chunk
         chunk = self.context_mgr.add_chunk("Test chunk", self.tokenizer)
         chunk_hash = chunk.sha256
 
         # Test unload command
-        handle_slash_command("unload", chunk_hash[:8], self.context_mgr, self.tokenizer)
+        handle_slash_command("unload", chunk_hash[:8], self.context_mgr, self.tokenizer, console=mock_console)
 
         # Verify chunk was unloaded to RAM
         self.assertEqual(self.context_mgr.chunks[chunk_hash].status, "cpu")
         self.assertNotIn(chunk_hash, self.context_mgr.active_chunks)
 
         # Verify success message
-        mock_print.assert_any_call(f"✓ Chunk moved to system RAM: {chunk_hash[:8]}...")
+        self.assertIn(f"✓ Chunk moved to system RAM: {chunk_hash[:8]}...", mock_console.get_output())
 
-    @patch('builtins.print')
-    def test_restore_command(self, mock_print):
+    def test_restore_command(self):
         """Test /restore command."""
+
+        # Create mock console
+
+        mock_console = MockConsole()
+
+        
         # Add and unload a chunk
         chunk = self.context_mgr.add_chunk("Test chunk", self.tokenizer)
         chunk_hash = chunk.sha256
         self.context_mgr.unload_chunk(chunk_hash)
 
         # Test restore command
-        handle_slash_command("restore", chunk_hash[:8], self.context_mgr, self.tokenizer)
+        handle_slash_command("restore", chunk_hash[:8], self.context_mgr, self.tokenizer, console=mock_console)
 
         # Verify chunk was restored to VRAM
         self.assertEqual(self.context_mgr.chunks[chunk_hash].status, "active")
         self.assertIn(chunk_hash, self.context_mgr.active_chunks)
 
         # Verify success message
-        mock_print.assert_any_call(f"✓ Chunk restored: {chunk_hash[:8]}...")
+        self.assertIn(f"✓ Chunk restored: {chunk_hash[:8]}...", mock_console.get_output())
 
-    @patch('builtins.print')
-    def test_erase_command(self, mock_print):
+    def test_erase_command(self):
         """Test /erase command."""
+
+        # Create mock console
+
+        mock_console = MockConsole()
+
+        
         # Add a chunk
         chunk = self.context_mgr.add_chunk("Test chunk", self.tokenizer)
         chunk_hash = chunk.sha256
 
         # Test erase command
-        handle_slash_command("erase", chunk_hash[:8], self.context_mgr, self.tokenizer)
+        handle_slash_command("erase", chunk_hash[:8], self.context_mgr, self.tokenizer, console=mock_console)
 
         # Verify chunk was erased
         self.assertNotIn(chunk_hash, self.context_mgr.chunks)
 
         # Verify success message
-        mock_print.assert_any_call(f"✓ Chunk erased from all locations: {chunk_hash[:8]}...")
+        self.assertIn(f"✓ Chunk erased from all locations: {chunk_hash[:8]}...", mock_console.get_output())
 
-    @patch('builtins.print')
-    def test_clear_command(self, mock_print):
+    def test_clear_command(self):
         """Test /clear command."""
+
+        # Create mock console
+
+        mock_console = MockConsole()
+
+        
         # Add multiple chunks
         self.context_mgr.add_chunk("Chunk 1", self.tokenizer)
         self.context_mgr.add_chunk("Chunk 2", self.tokenizer)
         self.context_mgr.add_chunk("Chunk 3", self.tokenizer)
 
         # Test clear command
-        handle_slash_command("clear", "", self.context_mgr, self.tokenizer)
+        handle_slash_command("clear", "", self.context_mgr, self.tokenizer, console=mock_console)
 
         # Verify all chunks were cleared
         self.assertEqual(len(self.context_mgr.chunks), 0)
 
         # Verify success message
-        mock_print.assert_any_call("✓ All chunks cleared")
+        self.assertIn("✓ All chunks cleared", mock_console.get_output())
 
-    @patch('builtins.print')
-    def test_help_command(self, mock_print):
+    def test_help_command(self):
         """Test /help command."""
-        handle_slash_command("help", "", self.context_mgr, self.tokenizer)
+
+        # Create mock console
+
+        mock_console = MockConsole()
+
+        
+        handle_slash_command("help", "", self.context_mgr, self.tokenizer, console=mock_console)
 
         # Verify help information was printed
-        printed_output = "".join(str(call) for call in mock_print.call_args_list)
-        self.assertIn("Available Commands", printed_output)
-        self.assertIn("/load", printed_output)
-        self.assertIn("/context", printed_output)
+        output = mock_console.get_output()
+        self.assertIn("Available Commands", output)
+        self.assertIn("/load", output)
+        self.assertIn("/context", output)
 
-    @patch('builtins.print')
-    def test_unknown_command(self, mock_print):
+    def test_unknown_command(self):
         """Test unknown command."""
-        handle_slash_command("unknown", "", self.context_mgr, self.tokenizer)
+
+        # Create mock console
+
+        mock_console = MockConsole()
+
+        
+        handle_slash_command("unknown", "", self.context_mgr, self.tokenizer, console=mock_console)
 
         # Verify error message
-        mock_print.assert_any_call("Unknown command: /unknown")
-        mock_print.assert_any_call("Type /help for available commands")
+        self.assertIn("Unknown command: /unknown", mock_console.get_output())
+        self.assertIn("Type /help for available commands", mock_console.get_output())
 
 
 class TestCLIIntegration(unittest.TestCase):
@@ -341,6 +466,10 @@ class TestCLIIntegration(unittest.TestCase):
     def setUpClass(cls):
         """Set up test fixtures once for all tests."""
         cls.model_path = Path.home() / "huggingface" / "Qwen3-0.6B"
+        
+        # Set different port to avoid conflicts
+        import os
+        os.environ["MASTER_PORT"] = "2335"
         
         # Initialize fixtures if not already done (for individual test runs)
         global _test_llm, _test_tokenizer, _test_context_mgr
@@ -384,14 +513,19 @@ class TestCLIIntegration(unittest.TestCase):
 
     def test_load_and_generation_workflow(self):
         """Test complete workflow: load content, generate with context."""
+
+        # Create mock console
+
+        mock_console = MockConsole()
+
+        
         # Create test file
         test_file = Path(self.temp_dir) / "context.txt"
         test_content = "The capital of France is Lyon. This is fictional information for testing."
         test_file.write_text(test_content)
 
         # Load content using CLI command
-        with patch('builtins.print'):
-            handle_slash_command("load", str(test_file), self.context_mgr, self.tokenizer)
+        handle_slash_command("load", str(test_file), self.context_mgr, self.tokenizer, console=mock_console)
 
         # Verify chunk was created
         self.assertEqual(len(self.context_mgr.chunks), 1)
@@ -406,50 +540,55 @@ class TestCLIIntegration(unittest.TestCase):
 
     def test_chunk_lifecycle_commands(self):
         """Test full chunk lifecycle through CLI commands."""
+
+        # Create mock console
+
+        mock_console = MockConsole()
+
+        
         # Add chunk
         chunk = self.context_mgr.add_chunk("Test lifecycle content", self.tokenizer)
         chunk_hash = chunk.sha256
 
         # Test deactivation
-        with patch('builtins.print'):
-            handle_slash_command("deactivate", chunk_hash[:8], self.context_mgr, self.tokenizer)
+        handle_slash_command("deactivate", chunk_hash[:8], self.context_mgr, self.tokenizer, console=mock_console)
         self.assertNotIn(chunk_hash, self.context_mgr.active_chunks)
 
         # Test reactivation
-        with patch('builtins.print'):
-            handle_slash_command("activate", chunk_hash[:8], self.context_mgr, self.tokenizer)
+        handle_slash_command("activate", chunk_hash[:8], self.context_mgr, self.tokenizer, console=mock_console)
         self.assertIn(chunk_hash, self.context_mgr.active_chunks)
 
         # Test tagging
-        with patch('builtins.print'):
-            handle_slash_command("tag", f"{chunk_hash[:8]} lifecycle-test", self.context_mgr, self.tokenizer)
+        handle_slash_command("tag", f"{chunk_hash[:8]} lifecycle-test", self.context_mgr, self.tokenizer, console=mock_console)
         self.assertIn("lifecycle-test", chunk.metadata["tags"])
 
         # Test save
-        with patch('builtins.print'):
-            handle_slash_command("save", chunk_hash[:8], self.context_mgr, self.tokenizer)
+        handle_slash_command("save", chunk_hash[:8], self.context_mgr, self.tokenizer, console=mock_console)
         save_path = Path(self.temp_dir) / f"{chunk_hash}.pkl"
         self.assertTrue(save_path.exists())
 
         # Test unload to RAM
-        with patch('builtins.print'):
-            handle_slash_command("unload", chunk_hash[:8], self.context_mgr, self.tokenizer)
+        handle_slash_command("unload", chunk_hash[:8], self.context_mgr, self.tokenizer, console=mock_console)
         self.assertEqual(self.context_mgr.chunks[chunk_hash].status, "cpu")
         self.assertNotIn(chunk_hash, self.context_mgr.active_chunks)
 
         # Test restoration from RAM
-        with patch('builtins.print'):
-            handle_slash_command("restore", chunk_hash[:8], self.context_mgr, self.tokenizer)
+        handle_slash_command("restore", chunk_hash[:8], self.context_mgr, self.tokenizer, console=mock_console)
         self.assertEqual(self.context_mgr.chunks[chunk_hash].status, "active")
         self.assertIn(chunk_hash, self.context_mgr.active_chunks)
         
         # Test complete erasure
-        with patch('builtins.print'):
-            handle_slash_command("erase", chunk_hash[:8], self.context_mgr, self.tokenizer)
+        handle_slash_command("erase", chunk_hash[:8], self.context_mgr, self.tokenizer, console=mock_console)
         self.assertNotIn(chunk_hash, self.context_mgr.chunks)
 
     def test_multiple_chunks_management(self):
         """Test managing multiple chunks through CLI."""
+
+        # Create mock console
+
+        mock_console = MockConsole()
+
+        
         # Create multiple test files
         files_content = {
             "file1.txt": "Content of first file.",
@@ -462,25 +601,21 @@ class TestCLIIntegration(unittest.TestCase):
             file_path.write_text(content)
 
             # Load each file
-            with patch('builtins.print'):
-                handle_slash_command("load", str(file_path), self.context_mgr, self.tokenizer)
+            handle_slash_command("load", str(file_path), self.context_mgr, self.tokenizer, console=mock_console)
 
         # Verify all chunks were created
         self.assertEqual(len(self.context_mgr.chunks), 3)
 
         # Test context command with multiple chunks
-        with patch('builtins.print') as mock_print:
-            handle_slash_command("context", "", self.context_mgr, self.tokenizer)
+        handle_slash_command("context", "", self.context_mgr, self.tokenizer, console=mock_console)
 
-            # Verify output mentions multiple chunks
-            printed_output = "".join(str(call) for call in mock_print.call_args_list)
-            # Check that we have references to files or chunks
-            self.assertTrue(any("file" in call.lower() or "chunk" in call.lower()
-                              for call in [str(c) for c in mock_print.call_args_list]))
+        # Verify output mentions multiple chunks
+        output = mock_console.get_output()
+        # Check that we have references to files or chunks
+        self.assertTrue("file" in output.lower() or "chunk" in output.lower())
 
         # Test clearing all chunks
-        with patch('builtins.print'):
-            handle_slash_command("clear", "", self.context_mgr, self.tokenizer)
+        handle_slash_command("clear", "", self.context_mgr, self.tokenizer, console=mock_console)
 
         self.assertEqual(len(self.context_mgr.chunks), 0)
 

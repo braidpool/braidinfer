@@ -23,7 +23,9 @@ class ModelRunner:
         self.rank = rank
         self.event = event
     
-        dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
+        import os
+        master_port = os.environ.get("MASTER_PORT", "2333")
+        dist.init_process_group("nccl", f"tcp://localhost:{master_port}", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(hf_config.torch_dtype)

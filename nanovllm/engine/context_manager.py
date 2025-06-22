@@ -368,6 +368,88 @@ class ContextManager:
         finally:
             reset_context()
     
+    def populate_kv_cache_optimized(self, chunk: ChunkInfo) -> None:
+        """Populate KV cache by computing only necessary attention projections
+        
+        This is a more efficient version that avoids full model forward pass
+        when we only need to populate the KV cache.
+        """
+        import torch
+        from nanovllm.layers.attention import store_kvcache
+        
+        if not hasattr(self, 'llm_engine') or self.llm_engine is None:
+            raise RuntimeError("No LLM engine available for cache population")
+            
+        if chunk.cache_populated:
+            return
+            
+        model = self.llm_engine.model_runner.model
+        
+        # Prepare inputs
+        input_ids = torch.tensor(chunk.token_ids, dtype=torch.int64, device='cuda')
+        positions = torch.arange(len(chunk.token_ids), device='cuda')
+        
+        # Create slot mapping for this chunk
+        slot_mapping = []
+        for i, block_id in enumerate(chunk.blocks):
+            start_idx = i * self.block_manager.block_size
+            end_idx = min((i + 1) * self.block_manager.block_size, len(chunk.token_ids))
+            tokens_in_block = end_idx - start_idx
+            
+            start_slot = block_id * self.block_manager.block_size
+            slot_mapping.extend(range(start_slot, start_slot + tokens_in_block))
+            
+        slot_mapping_tensor = torch.tensor(slot_mapping, dtype=torch.int32, device='cuda')
+        
+        with torch.inference_mode():
+            # Get embeddings
+            hidden_states = model.model.embed_tokens(input_ids)
+            
+            # Process through each layer
+            residual = None
+            for layer_idx, layer in enumerate(model.model.layers):
+                # Apply layer norm
+                if residual is None:
+                    residual = hidden_states
+                    normed_hidden = layer.input_layernorm(hidden_states)
+                else:
+                    normed_hidden, residual = layer.input_layernorm(hidden_states, residual)
+                
+                # Get attention module
+                attn = layer.self_attn
+                
+                # Compute QKV projections
+                qkv = attn.qkv_proj(normed_hidden)
+                q_size = attn.q_size
+                kv_size = attn.kv_size
+                q, k, v = qkv.split([q_size, kv_size, kv_size], dim=-1)
+                
+                # Apply normalization
+                q = attn.q_norm(q.view(-1, attn.num_heads, attn.head_dim)).view(q.shape)
+                k = attn.k_norm(k.view(-1, attn.num_kv_heads, attn.head_dim)).view(k.shape)
+                
+                # Apply rotary embeddings
+                q, k = attn.rotary_emb(positions, q, k)
+                
+                # Reshape for store_kvcache
+                k = k.view(-1, attn.num_kv_heads, attn.head_dim)
+                v = v.view(-1, attn.num_kv_heads, attn.head_dim)
+                
+                # Store K/V in cache
+                store_kvcache(k, v, attn.attn.k_cache, attn.attn.v_cache, slot_mapping_tensor)
+                
+                # For next layer, we need the full forward pass result
+                # So we complete this layer's computation
+                o = attn.attn(q, k, v)
+                hidden_states = attn.o_proj(o)
+                
+                # MLP forward
+                hidden_states, residual = layer.post_attention_layernorm(hidden_states, residual)
+                hidden_states = layer.mlp(hidden_states)
+        
+        chunk.cache_populated = True
+        print(f"✓ KV cache populated (optimized) for chunk {chunk.sha256[:16]}...")
+    
     @contextmanager
     def track_output(self, metadata: Optional[Dict] = None):
         """Context manager to track model outputs as chunks"""
@@ -467,6 +549,58 @@ class ContextManager:
         # Update virtual block table
         self.virtual_block_table.deactivate_chunk(chunk_hash)
         
+    def extract_kv_cache_for_chunk(self, chunk: ChunkInfo) -> Optional[Dict[str, List]]:
+        """Extract K/V cache tensors for a specific chunk"""
+        if not chunk.cache_populated:
+            return None
+            
+        # Access model through the chain
+        if not hasattr(self, 'llm_engine') or self.llm_engine is None:
+            return None
+            
+        k_cache_data = []
+        v_cache_data = []
+        
+        try:
+            # Access the model layers
+            model = self.llm_engine.model_runner.model.model  # Qwen3Model instance
+            
+            for layer_idx, layer in enumerate(model.layers):
+                # Get attention module that contains k_cache and v_cache
+                attn_module = layer.self_attn.attn
+                
+                # Extract cache data for each block in this chunk
+                for block_idx, block_id in enumerate(chunk.blocks):
+                    # Calculate token range in this block
+                    block_start = block_idx * self.block_manager.block_size
+                    block_end = min(block_start + self.block_manager.block_size, len(chunk.token_ids))
+                    tokens_in_block = block_end - block_start
+                    
+                    if tokens_in_block > 0:
+                        # Extract K and V cache for this block
+                        # k_cache shape: [num_blocks, block_size, num_kv_heads, head_dim]
+                        k_block_data = attn_module.k_cache[block_id, :tokens_in_block].clone().cpu()
+                        v_block_data = attn_module.v_cache[block_id, :tokens_in_block].clone().cpu()
+                        
+                        k_cache_data.append({
+                            'layer': layer_idx,
+                            'block_id': block_id,
+                            'tokens': tokens_in_block,
+                            'data': k_block_data
+                        })
+                        v_cache_data.append({
+                            'layer': layer_idx,
+                            'block_id': block_id,
+                            'tokens': tokens_in_block,
+                            'data': v_block_data
+                        })
+            
+            return {'k_cache': k_cache_data, 'v_cache': v_cache_data}
+            
+        except Exception as e:
+            print(f"Warning: Failed to extract KV cache: {e}")
+            return None
+
     def save_chunk(self, chunk_hash: str):
         """Save chunk to disk"""
         # Resolve potentially partial hash
@@ -477,14 +611,10 @@ class ContextManager:
             
         chunk = self.chunks[chunk_hash]
         
-        # Collect KV cache data from blocks
-        k_cache_data = []
-        v_cache_data = []
-        
-        for block_id in chunk.blocks:
-            block = self.block_manager.blocks[block_id]
-            # This would need integration with model_runner to extract actual KV data
-            # For now, we save the block metadata
+        # Extract actual KV cache data if populated
+        kv_cache_data = None
+        if chunk.cache_populated:
+            kv_cache_data = self.extract_kv_cache_for_chunk(chunk)
             
         # Save to disk
         save_path = Path(self.disk_path) / f"{chunk_hash}.pkl"
@@ -493,13 +623,53 @@ class ContextManager:
                 'chunk_info': chunk,
                 'token_ids': chunk.token_ids,
                 'metadata': chunk.metadata,
-                # 'k_cache': k_cache_data,  # Would include actual KV tensors
-                # 'v_cache': v_cache_data,
+                'kv_cache_data': kv_cache_data  # Now includes actual tensors
             }, f)
             
             
         # Don't change status - chunk can be on disk AND in memory
         
+    def restore_kv_cache_for_chunk(self, chunk: ChunkInfo, cache_data: Dict[str, List]) -> None:
+        """Restore K/V cache tensors for a specific chunk"""
+        if not cache_data:
+            return
+            
+        # Access model through the chain
+        if not hasattr(self, 'llm_engine') or self.llm_engine is None:
+            return
+            
+        try:
+            model = self.llm_engine.model_runner.model.model
+            
+            k_cache_data = cache_data['k_cache']
+            v_cache_data = cache_data['v_cache']
+            
+            # Group by layer for efficient restoration
+            by_layer = {}
+            for k_entry, v_entry in zip(k_cache_data, v_cache_data):
+                layer_idx = k_entry['layer']
+                if layer_idx not in by_layer:
+                    by_layer[layer_idx] = []
+                by_layer[layer_idx].append((k_entry, v_entry))
+            
+            # Restore cache data
+            for layer_idx, entries in by_layer.items():
+                attn_module = model.layers[layer_idx].self_attn.attn
+                
+                for k_entry, v_entry in entries:
+                    block_id = k_entry['block_id']
+                    tokens = k_entry['tokens']
+                    
+                    # Copy data back to GPU cache
+                    attn_module.k_cache[block_id, :tokens].copy_(k_entry['data'].cuda())
+                    attn_module.v_cache[block_id, :tokens].copy_(v_entry['data'].cuda())
+                    
+            chunk.cache_populated = True
+            print(f"✓ KV cache restored for chunk {chunk.sha256[:16]}...")
+            
+        except Exception as e:
+            print(f"Warning: Failed to restore KV cache: {e}")
+
     def restore_chunk(self, chunk_hash: str) -> ChunkInfo:
         """Restore chunk from RAM or disk to VRAM"""
         # Try to resolve hash from existing chunks first
@@ -532,16 +702,20 @@ class ContextManager:
             data = pickle.load(f)
             
         chunk_info = data['chunk_info']
+        kv_cache_data = data.get('kv_cache_data')
         
         # Re-add the chunk if not already loaded
         if full_hash not in self.chunks:
-            # This would need to restore the actual KV cache data
-            # For now, we just restore the metadata
             self.chunks[full_hash] = chunk_info
             
             # Register with virtual block table
             if hasattr(chunk_info, 'blocks') and chunk_info.blocks:
                 self.virtual_block_table.register_chunk(full_hash, chunk_info.blocks)
+            
+        # Restore KV cache if data is available
+        if kv_cache_data and chunk_info.blocks:
+            # Ensure blocks are allocated (might need to allocate if restoring to new session)
+            self.restore_kv_cache_for_chunk(chunk_info, kv_cache_data)
             
         # Activate the chunk (move to VRAM)
         self.activate_chunk(full_hash)
@@ -561,14 +735,17 @@ class ContextManager:
         if chunk.status in ["cpu", "disk"]:
             return  # Already unloaded
             
-        # Extract KV cache data (placeholder - needs model_runner integration)
-        kv_data = {
+        # Extract actual KV cache data if populated
+        kv_cache_data = None
+        if chunk.cache_populated:
+            kv_cache_data = self.extract_kv_cache_for_chunk(chunk)
+            
+        # Store in CPU cache
+        self.cpu_cache[chunk_hash] = {
             'blocks': chunk.blocks,
             'token_ids': chunk.token_ids,
-            # Would include actual KV tensors moved to CPU
+            'kv_cache_data': kv_cache_data  # Include actual KV tensors
         }
-        
-        self.cpu_cache[chunk_hash] = kv_data
         
         # Mark blocks as CPU-resident
         for block_id in chunk.blocks:
@@ -583,9 +760,14 @@ class ContextManager:
             raise ValueError(f"Chunk not in CPU cache: {chunk_hash}")
             
         chunk = self.chunks[chunk_hash]
-        kv_data = self.cpu_cache[chunk_hash]
+        cpu_data = self.cpu_cache[chunk_hash]
         
-        # Restore KV data to GPU (placeholder - needs model_runner integration)
+        # Restore KV cache data if available
+        kv_cache_data = cpu_data.get('kv_cache_data')
+        if kv_cache_data and chunk.blocks:
+            self.restore_kv_cache_for_chunk(chunk, kv_cache_data)
+        
+        # Mark blocks as GPU-resident
         for block_id in chunk.blocks:
             self.block_manager.blocks[block_id].memory_tier = "gpu"
             
