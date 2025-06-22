@@ -111,6 +111,15 @@ class ModelRunner:
             seq.block_table + [-1] * (max_len - len(seq.block_table))
             for seq in seqs
         ]
+        
+        # Check if we need to filter blocks based on context manager
+        if hasattr(self.config, 'context_manager') and self.config.context_manager:
+            context_mgr = self.config.context_manager
+            if context_mgr.has_inactive_blocks():
+                # Use virtual block table for filtering
+                raw_tables = [seq.block_table for seq in seqs]
+                return context_mgr.get_filtered_block_table(raw_tables, filter_inactive=True).cuda(non_blocking=True)
+        
         block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         return block_tables
 
@@ -148,7 +157,12 @@ class ModelRunner:
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_k = torch.tensor(cu_seqlens_k, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        set_context(True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None, block_tables)
+        # Get active blocks if context manager is available
+        active_blocks = None
+        if hasattr(self.config, 'context_manager') and self.config.context_manager:
+            active_blocks = self.config.context_manager.get_active_blocks()
+            
+        set_context(True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None, block_tables, active_blocks)
         return input_ids, positions
 
     def prepare_decode(self, seqs: list[Sequence]):
@@ -166,7 +180,12 @@ class ModelRunner:
         slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         block_tables = self.prepare_block_tables(seqs)
-        set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables)
+        # Get active blocks if context manager is available
+        active_blocks = None
+        if hasattr(self.config, 'context_manager') and self.config.context_manager:
+            active_blocks = self.config.context_manager.get_active_blocks()
+            
+        set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables, active_blocks=active_blocks)
         return input_ids, positions
 
     def prepare_sample(self, seqs: list[Sequence]):
@@ -178,7 +197,13 @@ class ModelRunner:
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill):
-        if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
+        # Check if we need eager mode due to filtering
+        force_eager = False
+        if hasattr(self.config, 'context_manager') and self.config.context_manager:
+            if self.config.context_manager.has_inactive_blocks():
+                force_eager = True  # CUDA graphs don't support dynamic filtering
+                
+        if is_prefill or self.enforce_eager or force_eager or input_ids.size(0) > 512:
             return self.model.compute_logits(self.model(input_ids, positions))
         else:
             bs = input_ids.size(0)
@@ -234,7 +259,7 @@ class ModelRunner:
 
         for bs in reversed(self.graph_bs):
             graph = torch.cuda.CUDAGraph()
-            set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs])
+            set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs], active_blocks=None)
             outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
             with torch.cuda.graph(graph, self.graph_pool):
                 outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # capture

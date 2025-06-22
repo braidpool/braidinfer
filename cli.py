@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 import os
 import sys
 import re
@@ -125,48 +127,160 @@ def handle_slash_command(command: str, args: str, context_mgr: ContextManager, t
             )
 
             print_msg(f"✓ Added chunk:", GREEN)
-            print_msg(f"  Hash: {chunk.sha256}")
+            print_msg(f"  Hash: {chunk.sha256[:16]}...")
             print_msg(f"  Size: {chunk.size} tokens")
-            print_msg(f"  Position: {chunk.position[0]}-{chunk.position[1]}")
+            print_msg(f"  Blocks allocated: {len(chunk.blocks)}")
+            print_msg(f"  Note: Chunk is ready for use. KV cache will be populated during generation.", YELLOW)
 
         except Exception as e:
             print_msg(f"Error loading file: {e}", RED)
 
     elif command == "context":
         info = context_mgr.get_context_info()
+        memory_stats = context_mgr.get_memory_stats()
 
         if HAS_RICH and console:
-            console.print(f"\n[bold]Context Status:[/bold]")
+            from rich.table import Table
+            from rich.box import ROUNDED
+
+            # Create table for chunks
+            table = Table(title="Active Context", box=ROUNDED)
+            table.add_column("Hash", style="cyan", width=10)
+            table.add_column("Type", style="magenta", width=6)
+            table.add_column("Status", style="green", width=8)
+            table.add_column("Cache", style="yellow", width=7)
+            table.add_column("Tokens", justify="right", style="yellow", width=7)
+            table.add_column("Memory", justify="right", style="blue", width=10)
+            table.add_column("Preview", style="white", width=25)
+
+            # Get all chunks sorted by creation time
+            all_chunks = []
+            for status, chunks in info['chunks_by_status'].items():
+                for chunk in chunks:
+                    chunk['actual_status'] = status
+                    all_chunks.append(chunk)
+
+            all_chunks.sort(key=lambda x: x.get('created_at', 0))
+
+            # Add rows to table
+            for chunk in all_chunks:
+                hash_str = chunk['hash'][:8]
+                chunk_type = chunk.get('type', 'input')
+                status = chunk['actual_status']
+                tokens = str(chunk['size'])
+                memory = f"{chunk.get('memory_bytes', 0) / 1024 / 1024:.1f} MB"
+
+                # Get preview
+                if 'token_ids' in chunk:
+                    preview = context_mgr.get_preview(chunk['token_ids'], tokenizer)
+                else:
+                    # Try to get chunk directly for preview
+                    try:
+                        chunk_obj = context_mgr.chunks.get(chunk['hash'])
+                        if chunk_obj:
+                            preview = context_mgr.get_preview(chunk_obj.token_ids, tokenizer)
+                        else:
+                            preview = "<no preview available>"
+                    except:
+                        preview = "<no preview available>"
+
+                # Style based on status
+                if status == 'active':
+                    status_style = "[green]active[/green]"
+                elif status == 'inactive':
+                    status_style = "[yellow]inactive[/yellow]"
+                elif status == 'cpu':
+                    status_style = "[blue]cpu[/blue]"
+                else:
+                    status_style = "[dim]disk[/dim]"
+
+                # Style based on type
+                if chunk_type == 'output':
+                    type_style = "[magenta]output[/magenta]"
+                else:
+                    type_style = "[cyan]input[/cyan]"
+
+                # Cache status
+                cache_status = "✓" if chunk.get('cache_populated', False) else "○"
+                cache_style = "[green]✓[/green]" if chunk.get('cache_populated', False) else "[dim]○[/dim]"
+
+                table.add_row(hash_str, type_style, status_style, cache_style, tokens, memory, preview)
+
+            console.print(table)
+
+            # Memory usage summary
+            console.print(f"\n[bold]Memory Usage:[/bold]")
+            for tier, stats in memory_stats.items():
+                if stats['total'] > 0:
+                    console.print(f"  {tier.upper()}: {stats['total'] / 1024 / 1024:.1f} MB ({stats['count']} chunks) - Input: {stats['input'] / 1024 / 1024:.1f} MB, Output: {stats['output'] / 1024 / 1024:.1f} MB")
+
+            # Token summary
+            active_tokens = sum(c['size'] for c in all_chunks if c['actual_status'] == 'active')
+            total_tokens = sum(c['size'] for c in all_chunks)
+            console.print(f"\n[bold]Token Summary:[/bold]")
+            console.print(f"  Active Tokens: {active_tokens:,}")
+            console.print(f"  Total Tokens: {total_tokens:,}")
+            console.print(f"  Free Blocks: {info['free_blocks']} ({info['free_context']} tokens)")
+
         else:
+            # Plain text version
             print(f"\n{BOLD}Context Status:{RESET}")
+            print(f"{'─' * 85}")
+            print(f"{'Hash':<10} {'Type':<6} {'Status':<8} {'Cache':<5} {'Tokens':>7} {'Memory':>8} {'Preview':<45}")
+            print(f"{'─' * 85}")
 
-        print_msg(f"  Total: {info['total_context']} tokens")
-        print_msg(f"  Used: {info['used_context']} tokens")
-        print_msg(f"  Free: {info['free_context']} tokens")
+            # Get all chunks
+            all_chunks = []
+            for status, chunks in info['chunks_by_status'].items():
+                for chunk in chunks:
+                    chunk['actual_status'] = status
+                    all_chunks.append(chunk)
 
-        chunks_by_status = info.get('chunks_by_status', {})
+            all_chunks.sort(key=lambda x: x.get('created_at', 0))
 
-        # Show active chunks
-        active_chunks = chunks_by_status.get('active', [])
-        if active_chunks:
-            if HAS_RICH and console:
-                console.print(f"\n[bold green]Active Chunks:[/bold green]")
-            else:
-                print(f"\n{BOLD}{GREEN}Active Chunks:{RESET}")
+            for chunk in all_chunks:
+                hash_str = chunk['hash'][:8]
+                chunk_type = chunk.get('type', 'input')
+                status = chunk['actual_status']
+                tokens = chunk['size']
+                memory_mb = chunk.get('memory_bytes', 0) / 1024 / 1024
 
-            for i, chunk in enumerate(active_chunks, 1):
-                print_msg(f"  {i}. {chunk['hash'][:16]}... [{chunk['size']} tokens]")
+                # Get preview
+                try:
+                    chunk_obj = context_mgr.chunks.get(chunk['hash'])
+                    if chunk_obj:
+                        preview = context_mgr.get_preview(chunk_obj.token_ids, tokenizer, max_length=40)
+                    else:
+                        preview = "<no preview>"
+                except:
+                    preview = "<no preview>"
 
-        # Show inactive chunks
-        inactive_chunks = chunks_by_status.get('inactive', [])
-        if inactive_chunks:
-            if HAS_RICH and console:
-                console.print(f"\n[bold yellow]Inactive Chunks:[/bold yellow]")
-            else:
-                print(f"\n{BOLD}{YELLOW}Inactive Chunks:{RESET}")
+                # Color coding
+                if status == 'active':
+                    status_color = GREEN
+                elif status == 'inactive':
+                    status_color = YELLOW
+                else:
+                    status_color = GRAY
 
-            for i, chunk in enumerate(inactive_chunks, 1):
-                print_msg(f"  {i}. {chunk['hash'][:16]}... [{chunk['size']} tokens]")
+                # Cache status
+                cache_status = "✓" if chunk.get('cache_populated', False) else "○"
+
+                print(f"{hash_str:<10} {chunk_type:<6} {status_color}{status:<8}{RESET} {cache_status:<5} {tokens:>7} {memory_mb:>7.1f}M {preview:<45}")
+
+            print(f"{'─' * 85}")
+
+            # Memory summary
+            memory_stats = context_mgr.get_memory_stats()
+            print(f"\n{BOLD}Memory Usage:{RESET}")
+            for tier, stats in memory_stats.items():
+                if stats['total'] > 0:
+                    print(f"  {tier.upper()}: {stats['total'] / 1024 / 1024:.1f} MB ({stats['count']} chunks)")
+
+            # Token summary
+            active_tokens = sum(c['size'] for c in all_chunks if c['actual_status'] == 'active')
+            total_tokens = sum(c['size'] for c in all_chunks)
+            print(f"\n{BOLD}Tokens:{RESET} Active: {active_tokens:,} | Total: {total_tokens:,}")
 
     elif command == "activate":
         if not args:
@@ -220,9 +334,66 @@ def handle_slash_command(command: str, args: str, context_mgr: ContextManager, t
 
         try:
             context_mgr.erase_chunk(args.strip())
-            print_msg(f"✓ Chunk erased: {args.strip()[:16]}...", GREEN)
+            print_msg(f"✓ Chunk erased from all locations: {args.strip()[:16]}...", GREEN)
         except Exception as e:
             print_msg(f"Failed to erase chunk: {e}", RED)
+
+    elif command == "unload":
+        if not args:
+            print_msg("Usage: /unload <hash>", RED)
+            return
+
+        try:
+            context_mgr.unload_chunk(args.strip())
+            print_msg(f"✓ Chunk moved to system RAM: {args.strip()[:16]}...", GREEN)
+        except Exception as e:
+            print_msg(f"Failed to unload chunk: {e}", RED)
+
+    elif command == "compose":
+        if not args:
+            print_msg("Usage: /compose <hash1> <hash2> ...", RED)
+            return
+
+        try:
+            hashes = args.strip().split()
+            if len(hashes) < 2:
+                print_msg("Please provide at least 2 chunk hashes to compose", RED)
+                return
+
+            chunk = context_mgr.compose_chunks(hashes, tokenizer)
+            print_msg(f"✓ Composed new chunk:", GREEN)
+            print_msg(f"  Hash: {chunk.sha256[:16]}...")
+            print_msg(f"  Size: {chunk.size} tokens")
+            print_msg(f"  From: {len(hashes)} chunks")
+        except Exception as e:
+            print_msg(f"Failed to compose chunks: {e}", RED)
+
+    elif command == "tag":
+        parts = args.strip().split(None, 1)
+        if len(parts) < 2:
+            print_msg("Usage: /tag <hash> <tag>", RED)
+            return
+
+        hash_arg, tag = parts
+        try:
+            context_mgr.tag_chunk(hash_arg, tag)
+            print_msg(f"✓ Tagged chunk {hash_arg[:16]}... with '{tag}'", GREEN)
+        except Exception as e:
+            print_msg(f"Failed to tag chunk: {e}", RED)
+
+    elif command == "populate":
+        if not args:
+            print_msg("Usage: /populate <hash>", RED)
+            return
+
+        try:
+            populated = context_mgr.populate_chunk_cache(args.strip())
+            if populated:
+                print_msg(f"✓ Populated KV cache for chunk {args.strip()[:16]}...", GREEN)
+            else:
+                print_msg(f"Chunk {args.strip()[:16]}... already has populated cache", YELLOW)
+        except Exception as e:
+            print_msg(f"Failed to populate cache: {e}", RED)
 
     elif command == "clear":
         context_mgr.clear_all()
@@ -236,12 +407,16 @@ def handle_slash_command(command: str, args: str, context_mgr: ContextManager, t
 
         commands = [
             ("/load <file>", "Load a file as a context chunk"),
-            ("/context", "Show current context status"),
+            ("/context", "Show current context status with detailed table"),
             ("/activate <hash>", "Activate a chunk for inference"),
             ("/deactivate <hash>", "Deactivate a chunk"),
+            ("/populate <hash>", "Pre-populate KV cache for a chunk"),
+            ("/compose <h1> <h2>...", "Compose multiple chunks into one"),
+            ("/tag <hash> <tag>", "Add a tag to a chunk"),
             ("/save <hash>", "Save chunk to disk"),
-            ("/restore <hash>", "Restore chunk from disk"),
-            ("/erase <hash>", "Remove chunk completely"),
+            ("/unload <hash>", "Move chunk from VRAM to system RAM"),
+            ("/restore <hash>", "Move chunk from RAM/disk to VRAM"),
+            ("/erase <hash>", "Remove chunk from all locations"),
             ("/clear", "Clear all chunks"),
             ("/help", "Show this help message")
         ]
@@ -258,8 +433,9 @@ def handle_slash_command(command: str, args: str, context_mgr: ContextManager, t
 
 
 def main():
-    repo_id = "Qwen/Qwen3-0.6B"
-    path = Path.home() / "huggingface" / "Qwen3-0.6B"
+    name = "Qwen3-0.6B"
+    repo_id = "Qwen/" + name
+    path = Path.home() / "huggingface" / name
 
     console = Console() if HAS_RICH else None
 
@@ -275,6 +451,8 @@ def main():
     # Initialize context manager
     context_mgr = ContextManager(llm.scheduler.block_manager, llm.config)
     llm.context_manager = context_mgr  # Set reference in engine
+    llm.config.context_manager = context_mgr  # Make accessible to model runner
+    context_mgr.llm_engine = llm  # Give context manager access to LLM for cache population
 
     sampling_params = SamplingParams(temperature=0.6, max_tokens=512)
 
@@ -317,12 +495,19 @@ def main():
                     handle_slash_command(command, args, context_mgr, tokenizer, console)
                     continue
 
-                formatted_prompt = tokenizer.apply_chat_template(
-                    [{"role": "user", "content": user_input}],
-                    tokenize=False,
-                    add_generation_prompt=True,
-                    enable_thinking=True
-                )
+                # Use context manager to build prompt with active chunks
+                if context_mgr and len(context_mgr.active_chunks) > 0:
+                    formatted_prompt = context_mgr.build_prompt_with_context(
+                        [{"role": "user", "content": user_input}],
+                        tokenizer
+                    )
+                else:
+                    formatted_prompt = tokenizer.apply_chat_template(
+                        [{"role": "user", "content": user_input}],
+                        tokenize=False,
+                        add_generation_prompt=True,
+                        enable_thinking=True
+                    )
 
                 if HAS_RICH and console:
                     console.print("\n[bold green]Assistant[/bold green]:")
@@ -380,6 +565,13 @@ def main():
                                     except Exception:
                                         live_display.update(display_buffer)
                             else:
+                                # Check if output chunk was created
+                                if 'output_chunk' in token_data:
+                                    output_chunk = token_data['output_chunk']
+                                    if HAS_RICH and console:
+                                        console.print(f"\n[dim green]✓ Output saved as chunk: {output_chunk.sha256[:16]}... ({output_chunk.size} tokens)[/dim green]")
+                                    else:
+                                        print(f"\n✓ Output saved as chunk: {output_chunk.sha256[:16]}... ({output_chunk.size} tokens)")
                                 break
                 else:
                     # Plain text streaming for non-rich console
@@ -404,6 +596,10 @@ def main():
                             if not in_thinking and "<think" not in token and "</think>" not in token:
                                 print(token, end="", flush=True)
                         else:
+                            # Check if output chunk was created
+                            if 'output_chunk' in token_data:
+                                output_chunk = token_data['output_chunk']
+                                print(f"\n✓ Output saved as chunk: {output_chunk.sha256[:16]}... ({output_chunk.size} tokens)")
                             break
 
                 end_time = time.time()
