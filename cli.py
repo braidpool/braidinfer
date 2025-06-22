@@ -332,10 +332,11 @@ def handle_slash_command(command: str, args: str, context_mgr: ContextManager, t
 
         try:
             hash_input = args.strip()
-            chunk = context_mgr.get_chunk_by_hash(hash_input)
-            if not chunk:
-                print_msg(f"Chunk not found: {hash_input[:16]}...", "red")
-                return
+            from nanovllm.engine.context_manager_utils import resolve_chunk_hash
+            
+            # Resolve the hash (handles partial hashes)
+            full_hash = resolve_chunk_hash(hash_input, context_mgr.chunks)
+            chunk = context_mgr.chunks[full_hash]
 
             # Decode tokens to text
             try:
