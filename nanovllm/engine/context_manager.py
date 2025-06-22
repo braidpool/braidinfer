@@ -68,13 +68,53 @@ class OutputTracker:
             return None
             
         # Create chunk from output tokens
-        return self.context_manager._create_chunk_from_tokens(
+        chunk = self.context_manager._create_chunk_from_tokens(
             self.token_ids,
             tokenizer,
             ChunkType.OUTPUT,
             metadata,
             self.parent_chunks
         )
+        
+        # Store reference for conversation tracking
+        self._finalized_chunk = chunk
+        return chunk
+
+class ConversationOutputTracker(OutputTracker):
+    """Special output tracker for conversation tracking"""
+    
+    def __init__(self, context_manager, parent_chunks: List[str], input_chunk_hash: str, output_metadata: Dict):
+        super().__init__(context_manager, parent_chunks)
+        self.input_chunk_hash = input_chunk_hash
+        self.output_metadata = output_metadata
+    
+    def finalize(self, tokenizer, metadata: Optional[Dict] = None) -> Optional[ChunkInfo]:
+        """Create output chunk and add to conversation tracking"""
+        if not self.token_ids:
+            return None
+        
+        # Merge metadata
+        final_metadata = {**self.output_metadata, **(metadata or {})}
+        
+        # Create chunk from output tokens
+        chunk = self.context_manager._create_chunk_from_tokens(
+            self.token_ids,
+            tokenizer,
+            ChunkType.OUTPUT,
+            final_metadata,
+            self.parent_chunks
+        )
+        
+        # Store reference for conversation tracking
+        self._finalized_chunk = chunk
+        
+        # Add to conversation tracking
+        self.context_manager.conversation_chunks.append(chunk.sha256)
+        
+        # Auto-activate conversation output chunks
+        self.context_manager.activate_chunk(chunk.sha256)
+        
+        return chunk
 
 class ContextManager:
     """Manages context chunks with fine-grained control over KV cache"""
@@ -100,6 +140,10 @@ class ContextManager:
         
         # Output tracking
         self.output_trackers: List[OutputTracker] = []
+        
+        # Conversation tracking
+        self.conversation_turn = 0  # Current conversation turn number
+        self.conversation_chunks: List[str] = []  # Ordered list of conversation chunk hashes
         
         # Virtual block table for efficient filtering
         self.virtual_block_table = VirtualBlockTable(block_manager)
@@ -462,6 +506,116 @@ class ContextManager:
             yield tracker
         finally:
             self.output_trackers.remove(tracker)
+    
+    def add_conversation_input(self, user_input: str, tokenizer, metadata: Optional[Dict] = None) -> ChunkInfo:
+        """Add user input as a conversation chunk
+        
+        Args:
+            user_input: The user's input text
+            tokenizer: Tokenizer to encode the input
+            metadata: Optional additional metadata
+            
+        Returns:
+            The created input chunk
+        """
+        # Increment conversation turn for this input
+        self.conversation_turn += 1
+        
+        # Create metadata for this conversation turn
+        conversation_metadata = {
+            "role": "user",
+            "conversation_turn": self.conversation_turn,
+            "timestamp": time.time(),
+            **(metadata or {})
+        }
+        
+        # Create the input chunk
+        chunk = self.add_chunk(
+            content=user_input,
+            tokenizer=tokenizer,
+            metadata=conversation_metadata,
+            populate_cache=False,  # Don't auto-populate for conversation chunks during input
+            chunk_type=ChunkType.INPUT
+        )
+        
+        # Add to conversation tracking
+        self.conversation_chunks.append(chunk.sha256)
+        
+        # Auto-activate conversation chunks  
+        # Temporarily disable activation for debugging
+        # self.activate_chunk(chunk.sha256)
+        
+        return chunk
+    
+    @contextmanager
+    def track_conversation_output(self, input_chunk_hash: str, metadata: Optional[Dict] = None):
+        """Context manager to track assistant outputs as conversation chunks
+        
+        Args:
+            input_chunk_hash: Hash of the input chunk this output responds to
+            metadata: Optional additional metadata
+        """
+        # Get current active chunks as parents, including the input chunk
+        parent_chunks = list(self.active_chunks)
+        if input_chunk_hash not in parent_chunks:
+            parent_chunks.append(input_chunk_hash)
+            
+        # Create output metadata
+        output_metadata = {
+            "role": "assistant", 
+            "conversation_turn": self.conversation_turn,
+            "input_chunk": input_chunk_hash,
+            "timestamp": time.time(),
+            **(metadata or {})
+        }
+        
+        # Create special conversation output tracker
+        tracker = ConversationOutputTracker(self, parent_chunks, input_chunk_hash, output_metadata)
+        self.output_trackers.append(tracker)
+        
+        try:
+            yield tracker
+        finally:
+            self.output_trackers.remove(tracker)
+    
+    def get_conversation_chunks(self) -> List[ChunkInfo]:
+        """Get all chunks belonging to the current conversation in order"""
+        conversation_chunk_objects = []
+        for chunk_hash in self.conversation_chunks:
+            if chunk_hash in self.chunks:
+                conversation_chunk_objects.append(self.chunks[chunk_hash])
+        return conversation_chunk_objects
+    
+    def get_conversation_history(self, tokenizer) -> List[Dict[str, str]]:
+        """Get conversation history as a list of message dicts
+        
+        Returns:
+            List of dicts with 'role', 'content', and metadata
+        """
+        history = []
+        for chunk in self.get_conversation_chunks():
+            if chunk.metadata and 'role' in chunk.metadata:
+                content = tokenizer.decode(chunk.token_ids, skip_special_tokens=True)
+                history.append({
+                    "role": chunk.metadata['role'],
+                    "content": content,
+                    "chunk_hash": chunk.sha256,
+                    "turn": chunk.metadata.get('conversation_turn', 0),
+                    "timestamp": chunk.metadata.get('timestamp', 0)
+                })
+        return history
+    
+    def clear_conversation(self):
+        """Clear all conversation chunks but keep other context"""
+        for chunk_hash in self.conversation_chunks:
+            if chunk_hash in self.chunks:
+                self.erase_chunk(chunk_hash)
+        self.conversation_chunks.clear()
+        self.conversation_turn = 0
+        
+    def start_new_conversation(self):
+        """Start a new conversation (alias for clear_conversation)"""
+        self.clear_conversation()
     
     def compose_chunks(self, chunk_hashes: List[str], tokenizer, metadata: Optional[Dict] = None) -> ChunkInfo:
         """Compose multiple chunks into a new chunk"""
@@ -850,8 +1004,20 @@ class ContextManager:
         )
     
     def has_inactive_blocks(self) -> bool:
-        """Check if there are any inactive blocks."""
-        return len(self.active_chunks) < len(self.chunks)
+        """Check if there are any inactive blocks that need filtering.
+        
+        This should only return True when we have chunks that are actually
+        inactive and could interfere with block table operations.
+        """
+        # Only return True if we have inactive chunks that are not conversation chunks
+        # Conversation chunks that are active don't need block filtering
+        for chunk_hash, chunk in self.chunks.items():
+            if (chunk_hash not in self.active_chunks and 
+                chunk.status == "active" and
+                chunk.metadata and 
+                chunk.metadata.get('role') not in ['user', 'assistant']):
+                return True
+        return False
     
     def get_memory_stats(self) -> Dict[str, Dict[str, int]]:
         """Get memory statistics by chunk type and tier"""
@@ -902,8 +1068,11 @@ class ContextManager:
         active_chunk_infos = []
         for chunk_hash in self.active_chunks:
             chunk = self.chunks[chunk_hash]
-            # Only include INPUT chunks formatted as system messages
-            if chunk.chunk_type == ChunkType.INPUT:
+            # Only include INPUT chunks that are NOT conversation chunks as system messages
+            # Conversation chunks are handled separately in the messages flow
+            if (chunk.chunk_type == ChunkType.INPUT and 
+                chunk.metadata and 
+                chunk.metadata.get('role') != 'user'):
                 active_chunk_infos.append(chunk)
         
         # Sort by creation time to maintain order

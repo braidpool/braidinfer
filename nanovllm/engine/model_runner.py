@@ -22,7 +22,7 @@ class ModelRunner:
         self.world_size = config.tensor_parallel_size
         self.rank = rank
         self.event = event
-    
+
         import os
         master_port = os.environ.get("MASTER_PORT", "2333")
         dist.init_process_group("nccl", f"tcp://localhost:{master_port}", world_size=self.world_size, rank=rank)
@@ -113,7 +113,7 @@ class ModelRunner:
             seq.block_table + [-1] * (max_len - len(seq.block_table))
             for seq in seqs
         ]
-        
+
         # Check if we need to filter blocks based on context manager
         if hasattr(self.config, 'context_manager') and self.config.context_manager:
             context_mgr = self.config.context_manager
@@ -121,7 +121,7 @@ class ModelRunner:
                 # Use virtual block table for filtering
                 raw_tables = [seq.block_table for seq in seqs]
                 return context_mgr.get_filtered_block_table(raw_tables, filter_inactive=True).cuda(non_blocking=True)
-        
+
         block_tables = torch.tensor(block_tables, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
         return block_tables
 
@@ -149,7 +149,7 @@ class ModelRunner:
                 if i != seq.num_blocks - 1:
                     end = start + self.block_size
                 else:
-                    end = start + seq.last_block_num_tokens 
+                    end = start + seq.last_block_num_tokens
                 slot_mapping.extend(list(range(start, end)))
         assert len(input_ids) == len(slot_mapping)
         if cu_seqlens_k[-1] > cu_seqlens_q[-1]:    # prefix cache
@@ -163,7 +163,7 @@ class ModelRunner:
         active_blocks = None
         if hasattr(self.config, 'context_manager') and self.config.context_manager:
             active_blocks = self.config.context_manager.get_active_blocks()
-            
+
         set_context(True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None, block_tables, active_blocks)
         return input_ids, positions
 
@@ -186,7 +186,7 @@ class ModelRunner:
         active_blocks = None
         if hasattr(self.config, 'context_manager') and self.config.context_manager:
             active_blocks = self.config.context_manager.get_active_blocks()
-            
+
         set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables, active_blocks=active_blocks)
         return input_ids, positions
 
@@ -206,7 +206,7 @@ class ModelRunner:
             # Active chunks can use CUDA graphs as long as block tables are compatible
             if self.config.context_manager.has_inactive_blocks():
                 force_eager = True  # CUDA graphs don't support dynamic filtering
-                
+
         if is_prefill or self.enforce_eager or force_eager or input_ids.size(0) > 512:
             # Debug: print when using eager mode
             if hasattr(self.config, 'context_manager') and self.config.context_manager and len(self.config.context_manager.active_chunks) > 0:
@@ -220,14 +220,14 @@ class ModelRunner:
         else:
             bs = input_ids.size(0)
             context = get_context()
-            
+
             # For basic inference without context, use the original graphs
             if not hasattr(self.config, 'context_manager') or not self.config.context_manager or len(self.config.context_manager.active_chunks) == 0:
                 # Check if block tables fit in original graphs
                 if context.block_tables is not None and context.block_tables.size(1) > self.graph_vars["block_tables"].size(1):
                     # Block table too large, fall back to eager mode
                     return self.model.compute_logits(self.model(input_ids, positions))
-                    
+
                 # Use original single graph set
                 graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
                 self.reset_graph_vars()
@@ -239,28 +239,28 @@ class ModelRunner:
                     self.graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
                 graph.replay()
                 return self.model.compute_logits(self.graph_vars["outputs"][:bs])
-            
+
             # Determine required block table size for context manager inference
             required_block_size = self.current_max_block_size
             if context.block_tables is not None:
                 required_block_size = max(required_block_size, context.block_tables.size(1))
-            
+
             # Get appropriate graph set
             try:
                 graph_set = self.get_or_create_graph_set(required_block_size)
                 graphs = graph_set["graphs"]
                 graph_vars = graph_set["graph_vars"]
-                
+
                 # Reset graph vars
                 graph_vars["input_ids"].zero_()
                 graph_vars["positions"].zero_()
                 graph_vars["slot_mapping"].zero_()
                 graph_vars["context_lens"].zero_()
                 graph_vars["block_tables"].zero_()
-                
+
                 # Find appropriate batch size graph
                 graph = graphs[next(x for x in self.graph_bs if x >= bs)]
-                
+
                 # Set inputs
                 graph_vars["input_ids"][:bs] = input_ids
                 graph_vars["positions"][:bs] = positions
@@ -268,19 +268,19 @@ class ModelRunner:
                 graph_vars["context_lens"][:bs] = context.context_lens
                 if context.block_tables is not None:
                     graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
-                
+
                 # Debug: print when using CUDA graph with context
-                if hasattr(self.config, 'context_manager') and self.config.context_manager and len(self.config.context_manager.active_chunks) > 0:
-                    print(f"[DEBUG] Using CUDA graph with context ({len(self.config.context_manager.active_chunks)} active chunks, block_size={graph_set['max_block_size']})")
-                
+                #if hasattr(self.config, 'context_manager') and self.config.context_manager and len(self.config.context_manager.active_chunks) > 0:
+                #    print(f"[DEBUG] Using CUDA graph with context ({len(self.config.context_manager.active_chunks)} active chunks, block_size={graph_set['max_block_size']})")
+
                 graph.replay()
-                
+
                 # Periodic cleanup
                 if self.graph_recomputation_stats["recomputations"] % 5 == 0:
                     self.cleanup_unused_graphs()
-                
+
                 return self.model.compute_logits(graph_vars["outputs"][:bs])
-                
+
             except Exception as e:
                 # Fall back to eager mode if graph operations fail
                 print(f"[WARNING] CUDA graph execution failed ({e}), falling back to eager mode")
@@ -295,7 +295,7 @@ class ModelRunner:
             self.graph_vars["slot_mapping"].zero_()
             self.graph_vars["context_lens"].zero_()
             self.graph_vars["block_tables"].zero_()
-    
+
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
@@ -311,7 +311,7 @@ class ModelRunner:
         rng_state = torch.cuda.get_rng_state()
         torch.cuda.get_rng_state = lambda: rng_state
         torch.cuda.set_rng_state = lambda _: None
-    
+
         config = self.config
         hf_config = config.hf_config
         max_bs = min(self.config.max_num_seqs, 512)
@@ -325,7 +325,7 @@ class ModelRunner:
         self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
         self.graphs = {}
         self.graph_pool = None
-        
+
         # Dynamic graph recomputation infrastructure
         self.graph_sets = {}  # Dict[(max_block_table_size,): {bs: graph, ...}]
         self.current_max_block_size = max_num_blocks
@@ -351,7 +351,7 @@ class ModelRunner:
             block_tables=block_tables,
             outputs=outputs,
         )
-        
+
         # Store initial graph set
         self.graph_sets[max_num_blocks] = {
             "graphs": self.graphs.copy(),
@@ -367,34 +367,34 @@ class ModelRunner:
         """Recapture CUDA graphs with a specific block table size"""
         print(f"[INFO] Recomputing CUDA graphs for block table size {max_block_table_size}")
         self.graph_recomputation_stats["recomputations"] += 1
-        
+
         get_rng_state = torch.cuda.get_rng_state
         set_rng_state = torch.cuda.set_rng_state
         rng_state = torch.cuda.get_rng_state()
         torch.cuda.get_rng_state = lambda: rng_state
         torch.cuda.set_rng_state = lambda _: None
-    
+
         # Set device context for graph capture
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(self.config.hf_config.torch_dtype)
         torch.set_default_device("cuda")
-    
+
         config = self.config
         hf_config = config.hf_config
         max_bs = min(self.config.max_num_seqs, 512)
-        
+
         # Round up to reasonable increment to reduce recomputation frequency
         rounded_size = max(max_block_table_size, ((max_block_table_size + 15) // 16) * 16)
-        
+
         input_ids = torch.zeros(max_bs, dtype=torch.int64)
         positions = torch.zeros(max_bs, dtype=torch.int64)
         slot_mapping = torch.zeros(max_bs, dtype=torch.int32)
         context_lens = torch.zeros(max_bs, dtype=torch.int32)
         block_tables = torch.zeros(max_bs, rounded_size, dtype=torch.int32)
         outputs = torch.zeros(max_bs, hf_config.hidden_size)
-        
+
         graphs = {}
-        
+
         # Use existing graph pool to save memory
         for bs in reversed(self.graph_bs):
             graph = torch.cuda.CUDAGraph()
@@ -414,21 +414,21 @@ class ModelRunner:
             block_tables=block_tables,
             outputs=outputs,
         )
-        
+
         # Store the new graph set
         self.graph_sets[rounded_size] = {
             "graphs": graphs,
             "graph_vars": graph_vars,
             "max_block_size": rounded_size
         }
-        
+
         # Restore device context
         torch.set_default_device("cpu")
         torch.set_default_dtype(default_dtype)
-        
+
         torch.cuda.get_rng_state = get_rng_state
         torch.cuda.set_rng_state = set_rng_state
-        
+
         return rounded_size
 
     def get_or_create_graph_set(self, required_block_size: int):
@@ -438,7 +438,7 @@ class ModelRunner:
             if size >= required_block_size:
                 self.graph_recomputation_stats["cache_hits"] += 1
                 return graph_set
-        
+
         # Need to create new graph set
         actual_size = self.recapture_cudagraph_with_size(required_block_size)
         return self.graph_sets[actual_size]
@@ -447,11 +447,11 @@ class ModelRunner:
         """Clean up unused graph sets to manage memory"""
         if len(self.graph_sets) <= keep_recent:
             return
-            
+
         # Keep the most recent graph sets based on block size
         sorted_sizes = sorted(self.graph_sets.keys(), reverse=True)
         sizes_to_remove = sorted_sizes[keep_recent:]
-        
+
         for size in sizes_to_remove:
             print(f"[INFO] Cleaning up graph set for block size {size}")
             del self.graph_sets[size]

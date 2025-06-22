@@ -65,8 +65,14 @@ class LLMEngine:
     def is_finished(self):
         return self.scheduler.is_finished()
 
-    def generate_stream(self, prompt: str | list[int], sampling_params: SamplingParams):
-        """Generator that yields tokens as they are produced for a single prompt."""
+    def generate_stream(self, prompt: str | list[int], sampling_params: SamplingParams, input_chunk_hash: str = None):
+        """Generator that yields tokens as they are produced for a single prompt.
+        
+        Args:
+            prompt: The input prompt (string or token list)
+            sampling_params: Parameters for generation
+            input_chunk_hash: Optional hash of input chunk for conversation tracking
+        """
         if isinstance(prompt, str):
             prompt = self.tokenizer.encode(prompt)
         
@@ -82,6 +88,7 @@ class LLMEngine:
         output_tracker = None
         output_context = None
         if self.context_manager:
+            # Always use regular output tracking for debugging
             output_context = self.context_manager.track_output()
             output_tracker = output_context.__enter__()
         

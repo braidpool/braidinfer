@@ -333,7 +333,7 @@ def handle_slash_command(command: str, args: str, context_mgr: ContextManager, t
         try:
             hash_input = args.strip()
             from nanovllm.engine.context_manager_utils import resolve_chunk_hash
-            
+
             # Resolve the hash (handles partial hashes)
             full_hash = resolve_chunk_hash(hash_input, context_mgr.chunks)
             chunk = context_mgr.chunks[full_hash]
@@ -341,20 +341,20 @@ def handle_slash_command(command: str, args: str, context_mgr: ContextManager, t
             # Decode tokens to text
             try:
                 text = tokenizer.decode(chunk.token_ids, skip_special_tokens=False)
-                
+
                 # Create a panel to display the chunk content
                 from rich.panel import Panel
                 from rich.text import Text
-                
+
                 # Prepare header with chunk info
                 header = f"Chunk {chunk.sha256[:16]}... ({chunk.size} tokens, {chunk.status})"
                 if chunk.metadata:
                     if 'source' in chunk.metadata:
                         header += f" from {chunk.metadata['source']}"
-                
+
                 # Create content text with proper styling
                 content_text = Text(text)
-                
+
                 # Create panel with content
                 panel = Panel(
                     content_text,
@@ -363,15 +363,70 @@ def handle_slash_command(command: str, args: str, context_mgr: ContextManager, t
                     border_style="blue",
                     expand=False
                 )
-                
+
                 console.print(panel)
-                
+
             except Exception as decode_error:
                 print_msg(f"Error decoding chunk tokens: {decode_error}", "red")
                 print_msg(f"Raw token IDs: {chunk.token_ids[:20]}{'...' if len(chunk.token_ids) > 20 else ''}")
-                
+
         except Exception as e:
             print_msg(f"Failed to show chunk: {e}", "red")
+
+    elif command == "conversation":
+        try:
+            history = context_mgr.get_conversation_history(tokenizer)
+            if not history:
+                print_msg("No conversation history found", "yellow")
+                return
+
+            from rich.table import Table
+            from rich.box import ROUNDED
+
+            # Create table for conversation history
+            table = Table(title="Conversation History", box=ROUNDED)
+            table.add_column("Turn", style="cyan", width=4)
+            table.add_column("Role", style="magenta", width=9)
+            table.add_column("Hash", style="blue", width=10)
+            table.add_column("Content", style="white", width=60)
+
+            for msg in history:
+                turn = str(msg['turn'])
+                role = msg['role']
+                chunk_hash = msg['chunk_hash'][:8]
+                content = msg['content'][:100] + "..." if len(msg['content']) > 100 else msg['content']
+
+                # Style based on role
+                if role == 'user':
+                    role_style = "[bold blue]user[/bold blue]"
+                else:
+                    role_style = "[bold green]assistant[/bold green]"
+
+                table.add_row(turn, role_style, chunk_hash, content)
+
+            console.print(table)
+
+            # Summary
+            user_turns = sum(1 for msg in history if msg['role'] == 'user')
+            assistant_turns = sum(1 for msg in history if msg['role'] == 'assistant')
+            console.print(f"\n[bold]Summary:[/bold] {user_turns} user messages, {assistant_turns} assistant responses")
+
+        except Exception as e:
+            print_msg(f"Failed to show conversation history: {e}", "red")
+
+    elif command == "clear_conversation":
+        try:
+            context_mgr.clear_conversation()
+            print_msg("✓ Conversation history cleared", "green")
+        except Exception as e:
+            print_msg(f"Failed to clear conversation: {e}", "red")
+
+    elif command == "new_conversation":
+        try:
+            context_mgr.start_new_conversation()
+            print_msg("✓ Started new conversation", "green")
+        except Exception as e:
+            print_msg(f"Failed to start new conversation: {e}", "red")
 
     elif command == "clear":
         context_mgr.clear_all()
@@ -383,6 +438,7 @@ def handle_slash_command(command: str, args: str, context_mgr: ContextManager, t
         commands = [
             ("/load <file>", "Load a file as a context chunk (auto-populates KV cache)"),
             ("/context", "Show current context status with detailed table"),
+            ("/conversation", "Show conversation history in chronological order"),
             ("/show <hash>", "Display the text content of a chunk"),
             ("/activate <hash>", "Activate a chunk for inference"),
             ("/deactivate <hash>", "Deactivate a chunk"),
@@ -393,6 +449,8 @@ def handle_slash_command(command: str, args: str, context_mgr: ContextManager, t
             ("/unload <hash>", "Move chunk from VRAM to system RAM"),
             ("/restore <hash>", "Move chunk from RAM/disk to VRAM"),
             ("/erase <hash>", "Remove chunk from all locations"),
+            ("/clear_conversation", "Clear conversation history only"),
+            ("/new_conversation", "Start a new conversation"),
             ("/clear", "Clear all chunks"),
             ("/help", "Show this help message")
         ]
@@ -457,15 +515,34 @@ def main():
                     handle_slash_command(command, args, context_mgr, tokenizer, console)
                     continue
 
-                # Use context manager to build prompt with active chunks
-                if context_mgr and len(context_mgr.active_chunks) > 0:
-                    # Set up the generation context first
+                # Store user input for post-inference conversation tracking
+                current_user_input = user_input
+
+                # Temporarily deactivate ALL active chunks during inference to avoid interference
+                # Store currently active chunks for reactivation
+                chunks_to_reactivate = list(context_mgr.active_chunks)
+                for chunk_hash in chunks_to_reactivate:
+                    context_mgr.deactivate_chunk(chunk_hash)
+
+                # Use context manager to build prompt with active chunks (excluding conversation chunks as system messages)
+                # Check if we have non-conversation active chunks
+                non_conversation_chunks = []
+                for chunk_hash in context_mgr.active_chunks:
+                    chunk = context_mgr.chunks[chunk_hash]
+                    if (chunk.chunk_type.value == 'input' and
+                        chunk.metadata and
+                        chunk.metadata.get('role') != 'user'):
+                        non_conversation_chunks.append(chunk_hash)
+
+                if non_conversation_chunks:
+                    # We have non-conversation context, use the context building
                     context_mgr.setup_generation_context()
                     formatted_prompt = context_mgr.build_prompt_with_context(
                         [{"role": "user", "content": user_input}],
                         tokenizer
                     )
                 else:
+                    # No non-conversation context, use regular chat template
                     formatted_prompt = tokenizer.apply_chat_template(
                         [{"role": "user", "content": user_input}],
                         tokenize=False,
@@ -483,6 +560,7 @@ def main():
                 thinking_status = None
                 accumulated_text = ""
                 display_buffer = ""
+                generated_output_chunk = None  # Track output chunk for conversation
 
                 # Use Live display for real-time markdown rendering
                 with Live("", refresh_per_second=10, console=console) as live_display:
@@ -527,8 +605,8 @@ def main():
                         else:
                             # Check if output chunk was created
                             if 'output_chunk' in token_data:
-                                output_chunk = token_data['output_chunk']
-                                console.print(f"\n[dim green]✓ Output saved as chunk: {output_chunk.sha256[:16]}... ({output_chunk.size} tokens)[/dim green]")
+                                generated_output_chunk = token_data['output_chunk']
+                                console.print(f"\n[dim green]✓ Output saved as chunk: {generated_output_chunk.sha256[:16]}... ({generated_output_chunk.size} tokens)[/dim green]")
                             break
 
                 end_time = time.time()
@@ -536,6 +614,38 @@ def main():
                 last_tokens_per_sec = token_count / duration if duration > 0 else 0
 
                 print()
+
+                # Post-inference conversation tracking - create chunks after inference is complete
+                try:
+                    # Create conversation input chunk
+                    input_chunk = context_mgr.add_conversation_input(current_user_input, tokenizer)
+
+                    # The output chunk was already created during generation
+                    # Link it to conversation tracking if it exists
+                    if generated_output_chunk:
+                        # Add output chunk to conversation tracking
+                        context_mgr.conversation_chunks.append(generated_output_chunk.sha256)
+                        # Update output chunk metadata to mark it as conversation
+                        if generated_output_chunk.metadata is None:
+                            generated_output_chunk.metadata = {}
+                        generated_output_chunk.metadata.update({
+                            "role": "assistant",
+                            "conversation_turn": context_mgr.conversation_turn,
+                            "input_chunk": input_chunk.sha256,
+                            "timestamp": time.time()
+                        })
+                        # Activate the output chunk for conversation context
+                        context_mgr.activate_chunk(generated_output_chunk.sha256)
+
+                    # Reactivate all previously active chunks
+                    for chunk_hash in chunks_to_reactivate:
+                        context_mgr.activate_chunk(chunk_hash)
+
+                    # Show conversation chunk creation
+                    console.print(f"[dim]✓ Conversation turn {context_mgr.conversation_turn} saved[/dim]")
+
+                except Exception as e:
+                    console.print(f"[dim red]Warning: Failed to save conversation: {e}[/dim red]")
 
             except KeyboardInterrupt:
                 console.print("\n[dim]Interrupted by user[/dim]")
