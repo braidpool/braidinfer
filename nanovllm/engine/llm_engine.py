@@ -8,6 +8,7 @@ import torch.multiprocessing as mp
 from nanovllm.config import Config
 from nanovllm.sampling_params import SamplingParams
 from nanovllm.engine.sequence import Sequence
+from nanovllm.engine.virtual_sequence import VirtualSequence
 from nanovllm.engine.scheduler import Scheduler
 from nanovllm.engine.model_runner import ModelRunner
 
@@ -221,3 +222,153 @@ class LLMEngine:
             # Clean up output trackers
             for context in output_contexts.values():
                 context.__exit__(None, None, None)
+    
+    def infer_from_blocks(self, 
+                         existing_blocks: list[int],
+                         existing_token_count: int,
+                         new_tokens: list[int] = None,
+                         sampling_params: SamplingParams = None) -> str:
+        """
+        Run inference using existing KV cache blocks plus optional new tokens.
+        
+        Args:
+            existing_blocks: List of block IDs already in KV cache
+            existing_token_count: Number of tokens in existing blocks
+            new_tokens: Optional new tokens to append (if None, just continue generation)
+            sampling_params: Sampling parameters (if None, use defaults)
+            
+        Returns:
+            Generated text
+        """
+        if sampling_params is None:
+            sampling_params = SamplingParams(temperature=0.6, max_tokens=512)
+            
+        if new_tokens is None:
+            new_tokens = []
+            
+        # Create virtual sequence with existing blocks
+        seq = VirtualSequence(
+            token_ids=new_tokens,
+            sampling_params=sampling_params,
+            existing_blocks=existing_blocks,
+            existing_token_count=existing_token_count
+        )
+        
+        # Add to scheduler
+        self.scheduler.add(seq)
+        
+        # Run generation
+        generated_tokens = []
+        while not seq.is_finished:
+            seqs, is_prefill = self.scheduler.schedule()
+            if seq in seqs:
+                token_ids = self.model_runner.call("run", seqs, is_prefill)
+                self.scheduler.postprocess(seqs, token_ids)
+                
+                # Collect generated tokens
+                if len(seq.completion_token_ids) > len(generated_tokens):
+                    new_gen = seq.completion_token_ids[len(generated_tokens):]
+                    generated_tokens.extend(new_gen)
+        
+        # Decode and return
+        return self.tokenizer.decode(generated_tokens)
+    
+    def infer_from_blocks_stream(self, 
+                                existing_blocks: list[int],
+                                existing_token_count: int,
+                                new_tokens: list[int] = None,
+                                sampling_params: SamplingParams = None):
+        """
+        Stream inference using existing KV cache blocks plus optional new tokens.
+        
+        Args:
+            existing_blocks: List of block IDs already in KV cache
+            existing_token_count: Number of tokens in existing blocks
+            new_tokens: Optional new tokens to append (if None, just continue generation)
+            sampling_params: Sampling parameters (if None, use defaults)
+            
+        Yields:
+            Token data dicts with 'token', 'finished', etc.
+        """
+        if sampling_params is None:
+            sampling_params = SamplingParams(temperature=0.6, max_tokens=512)
+            
+        if new_tokens is None:
+            new_tokens = []
+            
+        # Create virtual sequence with existing blocks
+        seq = VirtualSequence(
+            token_ids=new_tokens,
+            sampling_params=sampling_params,
+            existing_blocks=existing_blocks,
+            existing_token_count=existing_token_count
+        )
+        
+        # Add to scheduler
+        self.scheduler.add(seq)
+        
+        # Track generated tokens
+        last_token_count = 0
+        
+        # Start tracking output if context manager is available
+        output_tracker = None
+        output_context = None
+        if self.context_manager:
+            output_context = self.context_manager.track_output()
+            output_tracker = output_context.__enter__()
+        
+        try:
+            while not seq.is_finished:
+                seqs, is_prefill = self.scheduler.schedule()
+                
+                if seq in seqs:
+                    token_ids = self.model_runner.call("run", seqs, is_prefill)
+                    self.scheduler.postprocess(seqs, token_ids)
+                    
+                    if not is_prefill and len(seq.completion_token_ids) > last_token_count:
+                        new_tokens = seq.completion_token_ids[last_token_count:]
+                        
+                        # Track generated tokens
+                        if output_tracker:
+                            output_tracker.add_tokens(new_tokens)
+                        
+                        for token_id in new_tokens:
+                            token_text = self.tokenizer.decode([token_id])
+                            yield {
+                                "token": token_text,
+                                "token_id": token_id,
+                                "finished": False,
+                                "text": self.tokenizer.decode(seq.completion_token_ids)
+                            }
+                        last_token_count = len(seq.completion_token_ids)
+            
+            # Finalize output chunk
+            if output_tracker and seq.completion_token_ids:
+                output_chunk = output_tracker.finalize(self.tokenizer)
+                if output_chunk:
+                    yield {
+                        "token": "",
+                        "token_id": None,
+                        "finished": True,
+                        "text": self.tokenizer.decode(seq.completion_token_ids),
+                        "output_chunk": output_chunk
+                    }
+                else:
+                    yield {
+                        "token": "",
+                        "token_id": None,
+                        "finished": True,
+                        "text": self.tokenizer.decode(seq.completion_token_ids)
+                    }
+            else:
+                yield {
+                    "token": "",
+                    "token_id": None,
+                    "finished": True,
+                    "text": self.tokenizer.decode(seq.completion_token_ids) if seq.completion_token_ids else ""
+                }
+                
+        finally:
+            # Clean up output tracker
+            if output_context:
+                output_context.__exit__(None, None, None)

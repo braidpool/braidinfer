@@ -14,7 +14,6 @@ class VirtualBlock:
     """Virtual block that can be mapped to a physical block"""
     virtual_id: int
     physical_id: int
-    is_active: bool
     chunk_hash: str
     
 class VirtualBlockTable:
@@ -47,7 +46,6 @@ class VirtualBlockTable:
             virtual_block = VirtualBlock(
                 virtual_id=virtual_id,
                 physical_id=physical_id,
-                is_active=True,
                 chunk_hash=chunk_hash
             )
             
@@ -63,7 +61,9 @@ class VirtualBlockTable:
             raise ValueError(f"Unknown chunk: {chunk_hash}")
             
         for virtual_id in self.chunk_to_virtual[chunk_hash]:
-            self.virtual_blocks[virtual_id].is_active = True
+            vblock = self.virtual_blocks[virtual_id]
+            if vblock.physical_id < len(self.block_manager.blocks):
+                self.block_manager.blocks[vblock.physical_id].activate()
             
         # Invalidate cache
         self.cached_tables.clear()
@@ -74,7 +74,9 @@ class VirtualBlockTable:
             raise ValueError(f"Unknown chunk: {chunk_hash}")
             
         for virtual_id in self.chunk_to_virtual[chunk_hash]:
-            self.virtual_blocks[virtual_id].is_active = False
+            vblock = self.virtual_blocks[virtual_id]
+            if vblock.physical_id < len(self.block_manager.blocks):
+                self.block_manager.blocks[vblock.physical_id].deactivate()
             
         # Invalidate cache
         self.cached_tables.clear()
@@ -83,8 +85,10 @@ class VirtualBlockTable:
         """Get set of active physical block IDs."""
         active_blocks = set()
         for vblock in self.virtual_blocks.values():
-            if vblock.is_active:
-                active_blocks.add(vblock.physical_id)
+            if vblock.physical_id < len(self.block_manager.blocks):
+                block = self.block_manager.blocks[vblock.physical_id]
+                if block.is_active:
+                    active_blocks.add(vblock.physical_id)
         return active_blocks
     
     def is_block_active(self, physical_id: int) -> bool:
@@ -92,7 +96,9 @@ class VirtualBlockTable:
         # First check if we have a virtual block for this physical ID
         for vblock in self.virtual_blocks.values():
             if vblock.physical_id == physical_id:
-                return vblock.is_active
+                if physical_id < len(self.block_manager.blocks):
+                    return self.block_manager.blocks[physical_id].is_active
+                return True
         # If not tracked, consider it active (for blocks not managed by context manager)
         return True
         
@@ -176,7 +182,9 @@ class VirtualBlockTable:
     def get_statistics(self) -> Dict:
         """Get statistics about virtual block usage."""
         total_virtual = len(self.virtual_blocks)
-        active_virtual = sum(1 for v in self.virtual_blocks.values() if v.is_active)
+        active_virtual = sum(1 for v in self.virtual_blocks.values() 
+                           if v.physical_id < len(self.block_manager.blocks) 
+                           and self.block_manager.blocks[v.physical_id].is_active)
         chunks = len(self.chunk_to_virtual)
         
         return {

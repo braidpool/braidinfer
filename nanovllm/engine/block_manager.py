@@ -4,6 +4,7 @@ import hashlib
 import numpy as np
 
 from nanovllm.engine.sequence import Sequence
+from nanovllm.engine.virtual_sequence import VirtualSequence
 
 
 class Block:
@@ -83,9 +84,15 @@ class BlockManager:
         self.free_block_ids.append(block_id)
 
     def can_allocate(self, seq: Sequence) -> bool:
+        if isinstance(seq, VirtualSequence):
+            # Only need blocks for new tokens
+            return len(self.free_block_ids) >= seq.num_new_blocks
         return len(self.free_block_ids) >= seq.num_blocks
 
     def allocate(self, seq: Sequence):
+        if isinstance(seq, VirtualSequence):
+            self._allocate_virtual(seq)
+            return
         assert not seq.block_table
         h = -1
         sha256_prefix = None
@@ -97,6 +104,8 @@ class BlockManager:
             if block_id == -1 or self.blocks[block_id].token_ids != token_ids:
                 cache_miss = True
             if cache_miss:
+                if not self.free_block_ids:
+                    raise RuntimeError(f"No free blocks available. Need block {i+1}/{seq.num_blocks}")
                 block_id = self.free_block_ids[0]
                 block = self._allocate_block(block_id)
             else:
@@ -113,13 +122,67 @@ class BlockManager:
                 self.hash_to_block_id[h] = block_id
                 sha256_prefix = sha256
             seq.block_table.append(block_id)
+    
+    def _allocate_virtual(self, seq: VirtualSequence):
+        """Allocate blocks for a virtual sequence (only new tokens)."""
+        # Existing blocks are already in seq.block_table
+        # We only need to allocate blocks for new tokens
+        
+        if not seq.new_token_ids:
+            # No new tokens to allocate
+            return
+            
+        # Increment ref count for existing blocks
+        for block_id in seq.existing_blocks:
+            if block_id in self.used_block_ids:
+                self.blocks[block_id].ref_count += 1
+            else:
+                # Block not in use? This shouldn't happen
+                raise ValueError(f"Existing block {block_id} is not in use")
+        
+        # Allocate blocks for new tokens
+        new_blocks = seq.get_new_token_blocks()
+        for block_tokens in new_blocks:
+            # Always allocate fresh blocks for new tokens
+            if not self.free_block_ids:
+                raise RuntimeError(f"No free blocks available. Need {len(new_blocks)} blocks, have 0 free blocks.")
+            block_id = self.free_block_ids[0]
+            block = self._allocate_block(block_id)
+            
+            # Update block with token data
+            if len(block_tokens) == self.block_size:
+                h = self.compute_hash(block_tokens)
+                sha256 = self.compute_sha256(block_tokens)
+                block.update(h, block_tokens, sha256)
+                self.hash_to_block_id[h] = block_id
+            else:
+                # Partial block
+                block.token_ids = block_tokens
+                
+            seq.block_table.append(block_id)
+            seq.mark_block_as_owned(block_id)
 
     def deallocate(self, seq: Sequence):
-        for block_id in reversed(seq.block_table):
-            block = self.blocks[block_id]
-            block.ref_count -= 1
-            if block.ref_count == 0:
-                self._deallocate_block(block_id)
+        if isinstance(seq, VirtualSequence):
+            # Only deallocate blocks we own, not existing blocks
+            for block_id in seq.owned_blocks:
+                block = self.blocks[block_id]
+                block.ref_count -= 1
+                if block.ref_count == 0:
+                    self._deallocate_block(block_id)
+            # Decrement ref count for existing blocks
+            for block_id in seq.existing_blocks:
+                if block_id in self.used_block_ids:
+                    self.blocks[block_id].ref_count -= 1
+                    if self.blocks[block_id].ref_count == 0:
+                        self._deallocate_block(block_id)
+        else:
+            # Standard deallocation
+            for block_id in reversed(seq.block_table):
+                block = self.blocks[block_id]
+                block.ref_count -= 1
+                if block.ref_count == 0:
+                    self._deallocate_block(block_id)
         seq.num_cached_tokens = 0
         seq.block_table.clear()
 
@@ -128,9 +191,13 @@ class BlockManager:
 
     def may_append(self, seq: Sequence):
         block_table = seq.block_table
+        if not block_table:
+            return  # Nothing to append to
         last_block = self.blocks[block_table[-1]]
         if len(seq) % self.block_size == 1:
             assert last_block.hash != -1
+            if not self.free_block_ids:
+                raise RuntimeError("No free blocks available for append")
             block_id = self.free_block_ids[0]
             self._allocate_block(block_id)
             block_table.append(block_id)

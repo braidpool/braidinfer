@@ -6,6 +6,7 @@ from multiprocessing.shared_memory import SharedMemory
 
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence
+from nanovllm.engine.virtual_sequence import VirtualSequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.utils.context import set_context, get_context, reset_context
@@ -151,6 +152,12 @@ class ModelRunner:
                 else:
                     end = start + seq.last_block_num_tokens
                 slot_mapping.extend(list(range(start, end)))
+        if len(input_ids) != len(slot_mapping):
+            print(f"[DEBUG] prepare_prefill mismatch:")
+            print(f"  input_ids length: {len(input_ids)}")
+            print(f"  slot_mapping length: {len(slot_mapping)}")
+            for i, seq in enumerate(seqs):
+                print(f"  Seq {i}: len={len(seq)}, cached={seq.num_cached_tokens}, blocks={seq.num_blocks}, cached_blocks={seq.num_cached_blocks}")
         assert len(input_ids) == len(slot_mapping)
         if cu_seqlens_k[-1] > cu_seqlens_q[-1]:    # prefix cache
             block_tables = self.prepare_block_tables(seqs)
@@ -176,6 +183,8 @@ class ModelRunner:
             input_ids.append(seq.last_token)
             positions.append(len(seq))
             context_lens.append(len(seq))
+            if not seq.block_table:
+                raise RuntimeError(f"Sequence has empty block_table in prepare_decode")
             slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens  - 1)
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)

@@ -19,7 +19,7 @@ class Sequence:
         self.seq_id = next(Sequence.counter)
         self.status = SequenceStatus.WAITING
         self.token_ids = copy(token_ids)
-        self.last_token = token_ids[-1]
+        self.last_token = token_ids[-1] if token_ids else 0
         self.num_tokens = len(self.token_ids)
         self.num_prompt_tokens = len(token_ids)
         self.num_cached_tokens = 0

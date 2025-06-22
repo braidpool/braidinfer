@@ -13,8 +13,11 @@ import json
 import pickle
 import torch
 import time
-from dataclasses import dataclass
-from typing import Dict, List, Set, Optional, Tuple
+from dataclasses import dataclass, field
+from typing import Dict, List, Set, Optional, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from nanovllm.engine.block_manager import BlockManager
 from pathlib import Path
 from enum import Enum
 from contextlib import contextmanager
@@ -29,17 +32,15 @@ class ChunkType(Enum):
     OUTPUT = "output"
 
 class ChunkStatus(Enum):
-    ACTIVE = "active"
-    INACTIVE = "inactive"
-    CPU = "cpu"
-    DISK = "disk"
+    GPU = "gpu"      # In GPU memory
+    CPU = "cpu"      # In CPU memory
+    DISK = "disk"    # On disk only
 
 @dataclass
 class ChunkInfo:
     """Information about a context chunk"""
     sha256: str
     blocks: List[int]  # Block IDs
-    token_ids: List[int]
     size: int  # Number of tokens
     position: Tuple[int, int]  # Start and end position in context
     metadata: Dict
@@ -49,6 +50,38 @@ class ChunkInfo:
     created_at: float
     memory_bytes: int  # Track memory usage
     cache_populated: bool = False  # Whether KV cache has been populated
+    _block_manager: Optional['BlockManager'] = field(default=None, init=False, repr=False)  # Reference to block manager for token retrieval
+    
+    def get_token_ids(self) -> List[int]:
+        """Retrieve token IDs from blocks"""
+        if not self._block_manager or not self.blocks:
+            return []
+        
+        token_ids = []
+        for block_id in self.blocks:
+            if block_id < len(self._block_manager.blocks):
+                block = self._block_manager.blocks[block_id]
+                token_ids.extend(block.token_ids)
+        
+        # Trim to actual size (last block may be partial)
+        return token_ids[:self.size]
+    
+    @property
+    def token_ids(self) -> List[int]:
+        """Backward compatibility property"""
+        return self.get_token_ids()
+    
+    @property
+    def is_active(self) -> bool:
+        """Check if all blocks in this chunk are active"""
+        if not self._block_manager or not self.blocks:
+            return False
+        
+        return all(
+            self._block_manager.blocks[block_id].is_active 
+            for block_id in self.blocks
+            if block_id < len(self._block_manager.blocks)
+        )
     
 
 class OutputTracker:
@@ -76,44 +109,8 @@ class OutputTracker:
             self.parent_chunks
         )
         
-        # Store reference for conversation tracking
+        # Store reference
         self._finalized_chunk = chunk
-        return chunk
-
-class ConversationOutputTracker(OutputTracker):
-    """Special output tracker for conversation tracking"""
-    
-    def __init__(self, context_manager, parent_chunks: List[str], input_chunk_hash: str, output_metadata: Dict):
-        super().__init__(context_manager, parent_chunks)
-        self.input_chunk_hash = input_chunk_hash
-        self.output_metadata = output_metadata
-    
-    def finalize(self, tokenizer, metadata: Optional[Dict] = None) -> Optional[ChunkInfo]:
-        """Create output chunk and add to conversation tracking"""
-        if not self.token_ids:
-            return None
-        
-        # Merge metadata
-        final_metadata = {**self.output_metadata, **(metadata or {})}
-        
-        # Create chunk from output tokens
-        chunk = self.context_manager._create_chunk_from_tokens(
-            self.token_ids,
-            tokenizer,
-            ChunkType.OUTPUT,
-            final_metadata,
-            self.parent_chunks
-        )
-        
-        # Store reference for conversation tracking
-        self._finalized_chunk = chunk
-        
-        # Add to conversation tracking
-        self.context_manager.conversation_chunks.append(chunk.sha256)
-        
-        # Auto-activate conversation output chunks
-        self.context_manager.activate_chunk(chunk.sha256)
-        
         return chunk
 
 class ContextManager:
@@ -142,8 +139,6 @@ class ContextManager:
         self.output_trackers: List[OutputTracker] = []
         
         # Conversation tracking
-        self.conversation_turn = 0  # Current conversation turn number
-        self.conversation_chunks: List[str] = []  # Ordered list of conversation chunk hashes
         
         # Virtual block table for efficient filtering
         self.virtual_block_table = VirtualBlockTable(block_manager)
@@ -226,8 +221,8 @@ class ContextManager:
         # Check if chunk already exists
         if sha256 in self.chunks:
             chunk = self.chunks[sha256]
-            # Reactivate if needed
-            if chunk.status != "active":
+            # Reactivate if needed (check blocks directly)
+            if not chunk.is_active:
                 self.activate_chunk(sha256)
             return chunk
             
@@ -286,17 +281,19 @@ class ContextManager:
         chunk = ChunkInfo(
             sha256=sha256,
             blocks=blocks,
-            token_ids=token_ids,
             size=len(token_ids),
             position=(start_pos, end_pos),
             metadata=metadata or {},
-            status="active",
+            status="gpu",
             chunk_type=chunk_type,
             parent_chunks=parent_chunks or [],
             created_at=time.time(),
             memory_bytes=memory_bytes,
             cache_populated=(chunk_type == ChunkType.OUTPUT)  # Output chunks are populated during generation
         )
+        
+        # Set block manager reference
+        chunk._block_manager = self.block_manager
         
         self.chunks[sha256] = chunk
         self.active_chunks.add(sha256)
@@ -357,14 +354,15 @@ class ContextManager:
         model_runner = self.llm_engine.model_runner
         
         # Prepare inputs for prefill
-        input_ids = chunk.token_ids
-        positions = list(range(len(chunk.token_ids)))
+        token_ids = chunk.get_token_ids()
+        input_ids = token_ids
+        positions = list(range(len(token_ids)))
         
         # Calculate slot mapping for our allocated blocks
         slot_mapping = []
         for i, block_id in enumerate(chunk.blocks):
             start_idx = i * self.block_manager.block_size
-            end_idx = min((i + 1) * self.block_manager.block_size, len(chunk.token_ids))
+            end_idx = min((i + 1) * self.block_manager.block_size, chunk.size)
             tokens_in_block = end_idx - start_idx
             
             # Map to slots in the allocated block
@@ -430,14 +428,15 @@ class ContextManager:
         model = self.llm_engine.model_runner.model
         
         # Prepare inputs
-        input_ids = torch.tensor(chunk.token_ids, dtype=torch.int64, device='cuda')
-        positions = torch.arange(len(chunk.token_ids), device='cuda')
+        token_ids = chunk.get_token_ids()
+        input_ids = torch.tensor(token_ids, dtype=torch.int64, device='cuda')
+        positions = torch.arange(len(token_ids), device='cuda')
         
         # Create slot mapping for this chunk
         slot_mapping = []
         for i, block_id in enumerate(chunk.blocks):
             start_idx = i * self.block_manager.block_size
-            end_idx = min((i + 1) * self.block_manager.block_size, len(chunk.token_ids))
+            end_idx = min((i + 1) * self.block_manager.block_size, chunk.size)
             tokens_in_block = end_idx - start_idx
             
             start_slot = block_id * self.block_manager.block_size
@@ -507,115 +506,30 @@ class ContextManager:
         finally:
             self.output_trackers.remove(tracker)
     
-    def add_conversation_input(self, user_input: str, tokenizer, metadata: Optional[Dict] = None) -> ChunkInfo:
-        """Add user input as a conversation chunk
-        
-        Args:
-            user_input: The user's input text
-            tokenizer: Tokenizer to encode the input
-            metadata: Optional additional metadata
-            
-        Returns:
-            The created input chunk
+    def get_all_active_blocks(self) -> tuple[list[int], int]:
         """
-        # Increment conversation turn for this input
-        self.conversation_turn += 1
-        
-        # Create metadata for this conversation turn
-        conversation_metadata = {
-            "role": "user",
-            "conversation_turn": self.conversation_turn,
-            "timestamp": time.time(),
-            **(metadata or {})
-        }
-        
-        # Create the input chunk
-        chunk = self.add_chunk(
-            content=user_input,
-            tokenizer=tokenizer,
-            metadata=conversation_metadata,
-            populate_cache=False,  # Don't auto-populate for conversation chunks during input
-            chunk_type=ChunkType.INPUT
-        )
-        
-        # Add to conversation tracking
-        self.conversation_chunks.append(chunk.sha256)
-        
-        # Auto-activate conversation chunks  
-        # Temporarily disable activation for debugging
-        # self.activate_chunk(chunk.sha256)
-        
-        return chunk
-    
-    @contextmanager
-    def track_conversation_output(self, input_chunk_hash: str, metadata: Optional[Dict] = None):
-        """Context manager to track assistant outputs as conversation chunks
-        
-        Args:
-            input_chunk_hash: Hash of the input chunk this output responds to
-            metadata: Optional additional metadata
-        """
-        # Get current active chunks as parents, including the input chunk
-        parent_chunks = list(self.active_chunks)
-        if input_chunk_hash not in parent_chunks:
-            parent_chunks.append(input_chunk_hash)
-            
-        # Create output metadata
-        output_metadata = {
-            "role": "assistant", 
-            "conversation_turn": self.conversation_turn,
-            "input_chunk": input_chunk_hash,
-            "timestamp": time.time(),
-            **(metadata or {})
-        }
-        
-        # Create special conversation output tracker
-        tracker = ConversationOutputTracker(self, parent_chunks, input_chunk_hash, output_metadata)
-        self.output_trackers.append(tracker)
-        
-        try:
-            yield tracker
-        finally:
-            self.output_trackers.remove(tracker)
-    
-    def get_conversation_chunks(self) -> List[ChunkInfo]:
-        """Get all chunks belonging to the current conversation in order"""
-        conversation_chunk_objects = []
-        for chunk_hash in self.conversation_chunks:
-            if chunk_hash in self.chunks:
-                conversation_chunk_objects.append(self.chunks[chunk_hash])
-        return conversation_chunk_objects
-    
-    def get_conversation_history(self, tokenizer) -> List[Dict[str, str]]:
-        """Get conversation history as a list of message dicts
+        Get all active blocks in the context (conversation + other context).
         
         Returns:
-            List of dicts with 'role', 'content', and metadata
+            Tuple of (block_ids, total_token_count)
         """
-        history = []
-        for chunk in self.get_conversation_chunks():
-            if chunk.metadata and 'role' in chunk.metadata:
-                content = tokenizer.decode(chunk.token_ids, skip_special_tokens=True)
-                history.append({
-                    "role": chunk.metadata['role'],
-                    "content": content,
-                    "chunk_hash": chunk.sha256,
-                    "turn": chunk.metadata.get('conversation_turn', 0),
-                    "timestamp": chunk.metadata.get('timestamp', 0)
-                })
-        return history
-    
-    def clear_conversation(self):
-        """Clear all conversation chunks but keep other context"""
-        for chunk_hash in self.conversation_chunks:
-            if chunk_hash in self.chunks:
-                self.erase_chunk(chunk_hash)
-        self.conversation_chunks.clear()
-        self.conversation_turn = 0
+        blocks = []
+        total_tokens = 0
         
-    def start_new_conversation(self):
-        """Start a new conversation (alias for clear_conversation)"""
-        self.clear_conversation()
+        # Sort chunks by creation time to maintain order
+        active_chunks = []
+        for chunk_hash in self.active_chunks:
+            chunk = self.chunks[chunk_hash]
+            if chunk.is_active and chunk.cache_populated:
+                active_chunks.append(chunk)
+                
+        active_chunks.sort(key=lambda x: x.created_at)
+        
+        for chunk in active_chunks:
+            blocks.extend(chunk.blocks)
+            total_tokens += chunk.size
+            
+        return blocks, total_tokens
     
     def compose_chunks(self, chunk_hashes: List[str], tokenizer, metadata: Optional[Dict] = None) -> ChunkInfo:
         """Compose multiple chunks into a new chunk"""
@@ -629,7 +543,7 @@ class ContextManager:
         combined_tokens = []
         for hash in resolved_hashes:
             chunk = self.chunks[hash]
-            combined_tokens.extend(chunk.token_ids)
+            combined_tokens.extend(chunk.get_token_ids())
         
         # Create new composed chunk
         return self._create_chunk_from_tokens(
@@ -674,7 +588,7 @@ class ContextManager:
         for block_id in chunk.blocks:
             self.block_manager.blocks[block_id].activate()
             
-        chunk.status = "active"
+        chunk.status = "gpu"
         self.active_chunks.add(chunk_hash)
         
         # Update virtual block table
@@ -690,14 +604,14 @@ class ContextManager:
             
         chunk = self.chunks[chunk_hash]
         
-        if chunk.status != "active":
+        if not chunk.is_active:
             return  # Already inactive
             
         # Deactivate all blocks
         for block_id in chunk.blocks:
             self.block_manager.blocks[block_id].deactivate()
             
-        chunk.status = "inactive"
+        # Keep status as gpu - deactivation is handled at block level
         self.active_chunks.discard(chunk_hash)
         
         # Update virtual block table
@@ -727,7 +641,7 @@ class ContextManager:
                 for block_idx, block_id in enumerate(chunk.blocks):
                     # Calculate token range in this block
                     block_start = block_idx * self.block_manager.block_size
-                    block_end = min(block_start + self.block_manager.block_size, len(chunk.token_ids))
+                    block_end = min(block_start + self.block_manager.block_size, chunk.size)
                     tokens_in_block = block_end - block_start
                     
                     if tokens_in_block > 0:
@@ -775,7 +689,7 @@ class ContextManager:
         with open(save_path, 'wb') as f:
             pickle.dump({
                 'chunk_info': chunk,
-                'token_ids': chunk.token_ids,
+                'token_ids': chunk.get_token_ids(),
                 'metadata': chunk.metadata,
                 'kv_cache_data': kv_cache_data  # Now includes actual tensors
             }, f)
@@ -857,9 +771,22 @@ class ContextManager:
             
         chunk_info = data['chunk_info']
         kv_cache_data = data.get('kv_cache_data')
+        saved_token_ids = data.get('token_ids', [])
         
         # Re-add the chunk if not already loaded
         if full_hash not in self.chunks:
+            # Ensure chunk has block_manager reference
+            chunk_info._block_manager = self.block_manager
+            
+            # Restore token data into blocks if needed
+            if saved_token_ids and chunk_info.blocks:
+                for i, block_id in enumerate(chunk_info.blocks):
+                    if block_id < len(self.block_manager.blocks):
+                        block = self.block_manager.blocks[block_id]
+                        start_idx = i * self.block_manager.block_size
+                        end_idx = min((i + 1) * self.block_manager.block_size, len(saved_token_ids))
+                        block.token_ids = saved_token_ids[start_idx:end_idx]
+            
             self.chunks[full_hash] = chunk_info
             
             # Register with virtual block table
@@ -897,7 +824,7 @@ class ContextManager:
         # Store in CPU cache
         self.cpu_cache[chunk_hash] = {
             'blocks': chunk.blocks,
-            'token_ids': chunk.token_ids,
+            'token_ids': chunk.get_token_ids(),
             'kv_cache_data': kv_cache_data  # Include actual KV tensors
         }
         
@@ -916,6 +843,16 @@ class ContextManager:
         chunk = self.chunks[chunk_hash]
         cpu_data = self.cpu_cache[chunk_hash]
         
+        # Restore token data into blocks
+        saved_token_ids = cpu_data.get('token_ids', [])
+        if saved_token_ids and chunk.blocks:
+            for i, block_id in enumerate(chunk.blocks):
+                if block_id < len(self.block_manager.blocks):
+                    block = self.block_manager.blocks[block_id]
+                    start_idx = i * self.block_manager.block_size
+                    end_idx = min((i + 1) * self.block_manager.block_size, len(saved_token_ids))
+                    block.token_ids = saved_token_ids[start_idx:end_idx]
+        
         # Restore KV cache data if available
         kv_cache_data = cpu_data.get('kv_cache_data')
         if kv_cache_data and chunk.blocks:
@@ -926,7 +863,7 @@ class ContextManager:
             self.block_manager.blocks[block_id].memory_tier = "gpu"
             
         del self.cpu_cache[chunk_hash]
-        chunk.status = "active"
+        chunk.status = "gpu"
         self.active_chunks.add(chunk_hash)
         
         return chunk
@@ -1013,7 +950,7 @@ class ContextManager:
         # Conversation chunks that are active don't need block filtering
         for chunk_hash, chunk in self.chunks.items():
             if (chunk_hash not in self.active_chunks and 
-                chunk.status == "active" and
+                chunk.status == "gpu" and
                 chunk.metadata and 
                 chunk.metadata.get('role') not in ['user', 'assistant']):
                 return True
@@ -1085,7 +1022,7 @@ class ContextManager:
         for chunk in active_chunk_infos:
             # Decode the chunk to get the original text
             # Skip chunks that look like they're already formatted
-            text = tokenizer.decode(chunk.token_ids)
+            text = tokenizer.decode(chunk.get_token_ids())
             if not text.startswith("<|im_start|>"):
                 # Add as system message
                 combined_messages.append({
@@ -1142,9 +1079,18 @@ class ContextManager:
                 "memory_bytes": chunk.memory_bytes,
                 "parent_chunks": chunk.parent_chunks,
                 "created_at": chunk.created_at,
-                "cache_populated": chunk.cache_populated
+                "cache_populated": chunk.cache_populated,
+                "is_active": chunk.is_active
             }
-            chunks_by_status[chunk.status].append(chunk_data)
+            
+            # Categorize based on memory location and activation state
+            if chunk.status == "gpu":
+                if chunk.is_active:
+                    chunks_by_status["active"].append(chunk_data)
+                else:
+                    chunks_by_status["inactive"].append(chunk_data)
+            else:
+                chunks_by_status[chunk.status].append(chunk_data)
             
         # Check for chunks on disk
         if self.disk_path and Path(self.disk_path).exists():
