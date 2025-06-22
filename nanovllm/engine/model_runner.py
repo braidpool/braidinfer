@@ -202,34 +202,99 @@ class ModelRunner:
         # Check if we need eager mode due to context manager
         force_eager = False
         if hasattr(self.config, 'context_manager') and self.config.context_manager:
-            # Force eager mode when context manager is active to avoid CUDA graph conflicts
-            if (self.config.context_manager.has_inactive_blocks() or 
-                len(self.config.context_manager.active_chunks) > 0):
-                force_eager = True  # CUDA graphs don't support dynamic filtering/context
+            # Only force eager mode when we have inactive blocks (filtering required)
+            # Active chunks can use CUDA graphs as long as block tables are compatible
+            if self.config.context_manager.has_inactive_blocks():
+                force_eager = True  # CUDA graphs don't support dynamic filtering
                 
         if is_prefill or self.enforce_eager or force_eager or input_ids.size(0) > 512:
+            # Debug: print when using eager mode
+            if hasattr(self.config, 'context_manager') and self.config.context_manager and len(self.config.context_manager.active_chunks) > 0:
+                reason = []
+                if is_prefill: reason.append("prefill")
+                if self.enforce_eager: reason.append("enforce_eager")
+                if force_eager: reason.append("force_eager")
+                if input_ids.size(0) > 512: reason.append("large_batch")
+                print(f"[DEBUG] Using eager mode with context. Reasons: {', '.join(reason)}")
             return self.model.compute_logits(self.model(input_ids, positions))
         else:
             bs = input_ids.size(0)
             context = get_context()
-            self.reset_graph_vars()
-            graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
-            graph_vars = self.graph_vars
-            graph_vars["input_ids"][:bs] = input_ids
-            graph_vars["positions"][:bs] = positions
-            graph_vars["slot_mapping"][:bs] = context.slot_mapping
-            graph_vars["context_lens"][:bs] = context.context_lens
-            graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
-            graph.replay()
-            return self.model.compute_logits(graph_vars["outputs"][:bs])
+            
+            # For basic inference without context, use the original graphs
+            if not hasattr(self.config, 'context_manager') or not self.config.context_manager or len(self.config.context_manager.active_chunks) == 0:
+                # Check if block tables fit in original graphs
+                if context.block_tables is not None and context.block_tables.size(1) > self.graph_vars["block_tables"].size(1):
+                    # Block table too large, fall back to eager mode
+                    return self.model.compute_logits(self.model(input_ids, positions))
+                    
+                # Use original single graph set
+                graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
+                self.reset_graph_vars()
+                self.graph_vars["input_ids"][:bs] = input_ids
+                self.graph_vars["positions"][:bs] = positions
+                self.graph_vars["slot_mapping"][:bs] = context.slot_mapping
+                self.graph_vars["context_lens"][:bs] = context.context_lens
+                if context.block_tables is not None:
+                    self.graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
+                graph.replay()
+                return self.model.compute_logits(self.graph_vars["outputs"][:bs])
+            
+            # Determine required block table size for context manager inference
+            required_block_size = self.current_max_block_size
+            if context.block_tables is not None:
+                required_block_size = max(required_block_size, context.block_tables.size(1))
+            
+            # Get appropriate graph set
+            try:
+                graph_set = self.get_or_create_graph_set(required_block_size)
+                graphs = graph_set["graphs"]
+                graph_vars = graph_set["graph_vars"]
+                
+                # Reset graph vars
+                graph_vars["input_ids"].zero_()
+                graph_vars["positions"].zero_()
+                graph_vars["slot_mapping"].zero_()
+                graph_vars["context_lens"].zero_()
+                graph_vars["block_tables"].zero_()
+                
+                # Find appropriate batch size graph
+                graph = graphs[next(x for x in self.graph_bs if x >= bs)]
+                
+                # Set inputs
+                graph_vars["input_ids"][:bs] = input_ids
+                graph_vars["positions"][:bs] = positions
+                graph_vars["slot_mapping"][:bs] = context.slot_mapping
+                graph_vars["context_lens"][:bs] = context.context_lens
+                if context.block_tables is not None:
+                    graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
+                
+                # Debug: print when using CUDA graph with context
+                if hasattr(self.config, 'context_manager') and self.config.context_manager and len(self.config.context_manager.active_chunks) > 0:
+                    print(f"[DEBUG] Using CUDA graph with context ({len(self.config.context_manager.active_chunks)} active chunks, block_size={graph_set['max_block_size']})")
+                
+                graph.replay()
+                
+                # Periodic cleanup
+                if self.graph_recomputation_stats["recomputations"] % 5 == 0:
+                    self.cleanup_unused_graphs()
+                
+                return self.model.compute_logits(graph_vars["outputs"][:bs])
+                
+            except Exception as e:
+                # Fall back to eager mode if graph operations fail
+                print(f"[WARNING] CUDA graph execution failed ({e}), falling back to eager mode")
+                self.graph_recomputation_stats["fallbacks"] += 1
+                return self.model.compute_logits(self.model(input_ids, positions))
 
     def reset_graph_vars(self):
-        graph_vars = self.graph_vars
-        graph_vars["input_ids"].zero_()
-        graph_vars["positions"].zero_()
-        graph_vars["slot_mapping"].zero_()
-        graph_vars["context_lens"].zero_()
-        graph_vars["block_tables"].zero_()
+        """Reset graph variables for basic inference"""
+        if hasattr(self, 'graph_vars') and self.graph_vars is not None:
+            self.graph_vars["input_ids"].zero_()
+            self.graph_vars["positions"].zero_()
+            self.graph_vars["slot_mapping"].zero_()
+            self.graph_vars["context_lens"].zero_()
+            self.graph_vars["block_tables"].zero_()
     
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
@@ -260,6 +325,11 @@ class ModelRunner:
         self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
         self.graphs = {}
         self.graph_pool = None
+        
+        # Dynamic graph recomputation infrastructure
+        self.graph_sets = {}  # Dict[(max_block_table_size,): {bs: graph, ...}]
+        self.current_max_block_size = max_num_blocks
+        self.graph_recomputation_stats = {"recomputations": 0, "cache_hits": 0, "fallbacks": 0}
 
         for bs in reversed(self.graph_bs):
             graph = torch.cuda.CUDAGraph()
@@ -281,6 +351,115 @@ class ModelRunner:
             block_tables=block_tables,
             outputs=outputs,
         )
+        
+        # Store initial graph set
+        self.graph_sets[max_num_blocks] = {
+            "graphs": self.graphs.copy(),
+            "graph_vars": {k: v.clone() for k, v in self.graph_vars.items()},
+            "max_block_size": max_num_blocks
+        }
 
         torch.cuda.get_rng_state = get_rng_state
         torch.cuda.set_rng_state = set_rng_state
+
+    @torch.inference_mode()
+    def recapture_cudagraph_with_size(self, max_block_table_size: int):
+        """Recapture CUDA graphs with a specific block table size"""
+        print(f"[INFO] Recomputing CUDA graphs for block table size {max_block_table_size}")
+        self.graph_recomputation_stats["recomputations"] += 1
+        
+        get_rng_state = torch.cuda.get_rng_state
+        set_rng_state = torch.cuda.set_rng_state
+        rng_state = torch.cuda.get_rng_state()
+        torch.cuda.get_rng_state = lambda: rng_state
+        torch.cuda.set_rng_state = lambda _: None
+    
+        # Set device context for graph capture
+        default_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(self.config.hf_config.torch_dtype)
+        torch.set_default_device("cuda")
+    
+        config = self.config
+        hf_config = config.hf_config
+        max_bs = min(self.config.max_num_seqs, 512)
+        
+        # Round up to reasonable increment to reduce recomputation frequency
+        rounded_size = max(max_block_table_size, ((max_block_table_size + 15) // 16) * 16)
+        
+        input_ids = torch.zeros(max_bs, dtype=torch.int64)
+        positions = torch.zeros(max_bs, dtype=torch.int64)
+        slot_mapping = torch.zeros(max_bs, dtype=torch.int32)
+        context_lens = torch.zeros(max_bs, dtype=torch.int32)
+        block_tables = torch.zeros(max_bs, rounded_size, dtype=torch.int32)
+        outputs = torch.zeros(max_bs, hf_config.hidden_size)
+        
+        graphs = {}
+        
+        # Use existing graph pool to save memory
+        for bs in reversed(self.graph_bs):
+            graph = torch.cuda.CUDAGraph()
+            set_context(False, slot_mapping=slot_mapping[:bs], context_lens=context_lens[:bs], block_tables=block_tables[:bs], active_blocks=None)
+            outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # warmup
+            with torch.cuda.graph(graph, self.graph_pool):
+                outputs[:bs] = self.model(input_ids[:bs], positions[:bs])    # capture
+            graphs[bs] = graph
+            torch.cuda.synchronize()
+            reset_context()
+
+        graph_vars = dict(
+            input_ids=input_ids,
+            positions=positions,
+            slot_mapping=slot_mapping,
+            context_lens=context_lens,
+            block_tables=block_tables,
+            outputs=outputs,
+        )
+        
+        # Store the new graph set
+        self.graph_sets[rounded_size] = {
+            "graphs": graphs,
+            "graph_vars": graph_vars,
+            "max_block_size": rounded_size
+        }
+        
+        # Restore device context
+        torch.set_default_device("cpu")
+        torch.set_default_dtype(default_dtype)
+        
+        torch.cuda.get_rng_state = get_rng_state
+        torch.cuda.set_rng_state = set_rng_state
+        
+        return rounded_size
+
+    def get_or_create_graph_set(self, required_block_size: int):
+        """Get existing graph set or create new one for required block table size"""
+        # Check if we have a suitable graph set
+        for size, graph_set in self.graph_sets.items():
+            if size >= required_block_size:
+                self.graph_recomputation_stats["cache_hits"] += 1
+                return graph_set
+        
+        # Need to create new graph set
+        actual_size = self.recapture_cudagraph_with_size(required_block_size)
+        return self.graph_sets[actual_size]
+
+    def cleanup_unused_graphs(self, keep_recent: int = 2):
+        """Clean up unused graph sets to manage memory"""
+        if len(self.graph_sets) <= keep_recent:
+            return
+            
+        # Keep the most recent graph sets based on block size
+        sorted_sizes = sorted(self.graph_sets.keys(), reverse=True)
+        sizes_to_remove = sorted_sizes[keep_recent:]
+        
+        for size in sizes_to_remove:
+            print(f"[INFO] Cleaning up graph set for block size {size}")
+            del self.graph_sets[size]
+
+    def print_graph_stats(self):
+        """Print CUDA graph recomputation statistics"""
+        stats = self.graph_recomputation_stats
+        graph_sets_info = {size: data["max_block_size"] for size, data in self.graph_sets.items()}
+        print(f"[GRAPH STATS] Recomputations: {stats['recomputations']}, "
+              f"Cache hits: {stats['cache_hits']}, Fallbacks: {stats['fallbacks']}")
+        print(f"[GRAPH STATS] Active graph sets: {graph_sets_info}")

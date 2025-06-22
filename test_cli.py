@@ -127,7 +127,10 @@ class TestCLICommands(unittest.TestCase):
         self.assertEqual(chunk.metadata["source"], str(self.test_file))
 
         # Verify success message was printed
-        self.assertIn("✓ Added chunk:", mock_console.get_output())
+        output = mock_console.get_output()
+        self.assertIn("✓ Added chunk:", output)
+        # Should also mention KV cache population
+        self.assertIn("KV cache:", output)
 
     def test_load_command_nonexistent_file(self):
         """Test /load command with nonexistent file."""
@@ -530,6 +533,9 @@ class TestCLIIntegration(unittest.TestCase):
         # Verify chunk was created
         self.assertEqual(len(self.context_mgr.chunks), 1)
         chunk = list(self.context_mgr.chunks.values())[0]
+        
+        # Should have populated KV cache on load
+        self.assertTrue(chunk.cache_populated)
 
         # Test generation with context
         messages = [{"role": "user", "content": "What is the capital of France?"}]
@@ -605,6 +611,10 @@ class TestCLIIntegration(unittest.TestCase):
 
         # Verify all chunks were created
         self.assertEqual(len(self.context_mgr.chunks), 3)
+        
+        # All chunks should have populated KV cache
+        for chunk in self.context_mgr.chunks.values():
+            self.assertTrue(chunk.cache_populated)
 
         # Test context command with multiple chunks
         handle_slash_command("context", "", self.context_mgr, self.tokenizer, console=mock_console)

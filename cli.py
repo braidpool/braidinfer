@@ -31,7 +31,7 @@ def ensure_weights(repo_id: str, local_dir: Path):
         # Check for config file
         has_config = (local_dir / "config.json").exists()
         needs_download = not (has_weights and has_config)
-    
+
     if needs_download:
         print(f"⏬ Downloading weights for {repo_id} into {local_dir} …")
         local_dir.mkdir(parents=True, exist_ok=True)
@@ -85,7 +85,7 @@ def render_response(text, console=None):
 
 def handle_slash_command(command: str, args: str, context_mgr: ContextManager, tokenizer, console=None):
     """Handle slash commands for context management"""
-    
+
     if not console:
         console = Console()
 
@@ -113,14 +113,15 @@ def handle_slash_command(command: str, args: str, context_mgr: ContextManager, t
             chunk = context_mgr.add_chunk(
                 content=content,
                 tokenizer=tokenizer,
-                metadata={"source": filename}
+                metadata={"source": filename},
+                populate_cache=True  # Populate KV cache immediately on load
             )
 
             print_msg(f"✓ Added chunk:", "green")
             print_msg(f"  Hash: {chunk.sha256[:16]}...")
             print_msg(f"  Size: {chunk.size} tokens")
             print_msg(f"  Blocks allocated: {len(chunk.blocks)}")
-            print_msg(f"  Note: Chunk is ready for use. KV cache will be populated during generation.", "yellow")
+            print_msg(f"  KV cache: {'populated' if chunk.cache_populated else 'not populated'}", "green" if chunk.cache_populated else "yellow")
 
         except Exception as e:
             print_msg(f"Error loading file: {e}", "red")
@@ -324,6 +325,53 @@ def handle_slash_command(command: str, args: str, context_mgr: ContextManager, t
         except Exception as e:
             print_msg(f"Failed to populate cache: {e}", "red")
 
+    elif command == "show":
+        if not args:
+            print_msg("Usage: /show <hash>", "red")
+            return
+
+        try:
+            hash_input = args.strip()
+            chunk = context_mgr.get_chunk_by_hash(hash_input)
+            if not chunk:
+                print_msg(f"Chunk not found: {hash_input[:16]}...", "red")
+                return
+
+            # Decode tokens to text
+            try:
+                text = tokenizer.decode(chunk.token_ids, skip_special_tokens=False)
+                
+                # Create a panel to display the chunk content
+                from rich.panel import Panel
+                from rich.text import Text
+                
+                # Prepare header with chunk info
+                header = f"Chunk {chunk.sha256[:16]}... ({chunk.size} tokens, {chunk.status})"
+                if chunk.metadata:
+                    if 'source' in chunk.metadata:
+                        header += f" from {chunk.metadata['source']}"
+                
+                # Create content text with proper styling
+                content_text = Text(text)
+                
+                # Create panel with content
+                panel = Panel(
+                    content_text,
+                    title=header,
+                    title_align="left",
+                    border_style="blue",
+                    expand=False
+                )
+                
+                console.print(panel)
+                
+            except Exception as decode_error:
+                print_msg(f"Error decoding chunk tokens: {decode_error}", "red")
+                print_msg(f"Raw token IDs: {chunk.token_ids[:20]}{'...' if len(chunk.token_ids) > 20 else ''}")
+                
+        except Exception as e:
+            print_msg(f"Failed to show chunk: {e}", "red")
+
     elif command == "clear":
         context_mgr.clear_all()
         print_msg("✓ All chunks cleared", "green")
@@ -332,8 +380,9 @@ def handle_slash_command(command: str, args: str, context_mgr: ContextManager, t
         console.print("\n[bold]Available Commands:[/bold]")
 
         commands = [
-            ("/load <file>", "Load a file as a context chunk"),
+            ("/load <file>", "Load a file as a context chunk (auto-populates KV cache)"),
             ("/context", "Show current context status with detailed table"),
+            ("/show <hash>", "Display the text content of a chunk"),
             ("/activate <hash>", "Activate a chunk for inference"),
             ("/deactivate <hash>", "Deactivate a chunk"),
             ("/populate <hash>", "Pre-populate KV cache for a chunk"),
@@ -377,7 +426,7 @@ def main():
     llm.config.context_manager = context_mgr  # Make accessible to model runner
     context_mgr.llm_engine = llm  # Give context manager access to LLM for cache population
 
-    sampling_params = SamplingParams(temperature=0.6, max_tokens=512)
+    sampling_params = SamplingParams(temperature=0.6, max_tokens=0)
 
     console.print("[bold green]🤖 Nano-vLLM Chat Interface with Context Manager[/bold green]")
     console.print("[dim]Type 'quit', 'exit', or press Ctrl+C to exit[/dim]")
