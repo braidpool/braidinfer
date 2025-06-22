@@ -18,6 +18,7 @@ class LLMEngine:
         config_fileds = {field.name for field in fields(Config)}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fileds}
         config = Config(model, **config_kwargs)
+        self.config = config  # Store config for access
         self.ps = []
         self.events = []
         ctx = mp.get_context("spawn")
@@ -31,6 +32,7 @@ class LLMEngine:
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = self.tokenizer.eos_token_id
         self.scheduler = Scheduler(config)
+        self.context_manager = None  # Will be set externally
         atexit.register(self.exit)
 
     def exit(self):
@@ -55,6 +57,41 @@ class LLMEngine:
 
     def is_finished(self):
         return self.scheduler.is_finished()
+
+    def generate_stream(self, prompt: str | list[int], sampling_params: SamplingParams):
+        """Generator that yields tokens as they are produced for a single prompt."""
+        if isinstance(prompt, str):
+            prompt = self.tokenizer.encode(prompt)
+        seq = Sequence(prompt, sampling_params)
+        self.scheduler.add(seq)
+        
+        last_token_count = 0
+        
+        while not seq.is_finished:
+            seqs, is_prefill = self.scheduler.schedule()
+            
+            if seq in seqs:
+                token_ids = self.model_runner.call("run", seqs, is_prefill)
+                self.scheduler.postprocess(seqs, token_ids)
+                
+                if not is_prefill and len(seq.completion_token_ids) > last_token_count:
+                    new_tokens = seq.completion_token_ids[last_token_count:]
+                    for token_id in new_tokens:
+                        token_text = self.tokenizer.decode([token_id])
+                        yield {
+                            "token": token_text,
+                            "token_id": token_id,
+                            "finished": False,
+                            "text": self.tokenizer.decode(seq.completion_token_ids)
+                        }
+                    last_token_count = len(seq.completion_token_ids)
+        
+        yield {
+            "token": "",
+            "token_id": None,
+            "finished": True,
+            "text": self.tokenizer.decode(seq.completion_token_ids)
+        }
 
     def generate(
         self,

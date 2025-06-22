@@ -64,16 +64,26 @@ class Attention(nn.Module):
         k_cache = self.k_cache
         v_cache = self.v_cache
         store_kvcache(k, v, k_cache, v_cache, context.slot_mapping)
+        
+        # Filter block tables based on active blocks if provided
+        block_tables = context.block_tables
+        if context.active_blocks is not None and block_tables is not None:
+            # Create a mask for active blocks
+            # This is a placeholder - actual implementation would need to properly filter
+            # the block tables to only include active blocks
+            # For now, we use the full block tables
+            pass
+            
         if context.is_prefill:
-            if context.block_tables is not None:    # prefix cache
+            if block_tables is not None:    # prefix cache
                 k, v = k_cache, v_cache
             o = flash_attn_varlen_func(q, k, v,
                                        max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
                                        max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
-                                       softmax_scale=self.scale, causal=True, block_table=context.block_tables)
+                                       softmax_scale=self.scale, causal=True, block_table=block_tables)
         else:    # decode
             o = flash_attn_with_kvcache(q.unsqueeze(1), k_cache, v_cache,
-                                        cache_seqlens=context.context_lens, block_table=context.block_tables, 
+                                        cache_seqlens=context.context_lens, block_table=block_tables, 
                                         softmax_scale=self.scale, causal=True)
         o = o.view(-1, self.num_heads * self.head_dim)
         return o

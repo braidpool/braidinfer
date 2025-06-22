@@ -1,5 +1,6 @@
 from collections import deque
 import xxhash
+import hashlib
 import numpy as np
 
 from nanovllm.engine.sequence import Sequence
@@ -11,16 +12,34 @@ class Block:
         self.block_id = block_id
         self.ref_count = 0
         self.hash = -1
+        self.sha256 = None  # SHA256 hash for content addressing
         self.token_ids = []
+        self.is_active = True  # Whether block is active for inference
+        self.metadata = {}  # Additional metadata (source, timestamp, etc)
+        self.memory_tier = "gpu"  # Current location: gpu/cpu/disk
 
-    def update(self, hash: int, token_ids: list[int]):
+    def update(self, hash: int, token_ids: list[int], sha256: str = None):
         self.hash = hash
         self.token_ids = token_ids
+        if sha256:
+            self.sha256 = sha256
 
     def reset(self):
         self.ref_count = 1
         self.hash = -1
+        self.sha256 = None
         self.token_ids = []
+        self.is_active = True
+        self.metadata = {}
+        self.memory_tier = "gpu"
+    
+    def activate(self):
+        """Activate block for inference"""
+        self.is_active = True
+    
+    def deactivate(self):
+        """Deactivate block (keep in cache but exclude from inference)"""
+        self.is_active = False
 
 
 class BlockManager:
@@ -40,6 +59,15 @@ class BlockManager:
             h.update(prefix.to_bytes(8, "little"))
         h.update(np.array(token_ids).tobytes())
         return h.intdigest()
+    
+    @classmethod
+    def compute_sha256(cls, token_ids: list[int], prefix: str = None):
+        """Compute SHA256 hash for content addressing"""
+        h = hashlib.sha256()
+        if prefix:
+            h.update(prefix.encode())
+        h.update(np.array(token_ids).tobytes())
+        return h.hexdigest()
 
     def _allocate_block(self, block_id: int) -> Block:
         block = self.blocks[block_id]
@@ -60,6 +88,7 @@ class BlockManager:
     def allocate(self, seq: Sequence):
         assert not seq.block_table
         h = -1
+        sha256_prefix = None
         cache_miss = False
         for i in range(seq.num_blocks):
             token_ids = seq.block(i)
@@ -78,8 +107,11 @@ class BlockManager:
                 else:
                     block = self._allocate_block(block_id)
             if h != -1:
-                block.update(h, token_ids)
+                # Compute SHA256 for content addressing
+                sha256 = self.compute_sha256(token_ids, sha256_prefix)
+                block.update(h, token_ids, sha256)
                 self.hash_to_block_id[h] = block_id
+                sha256_prefix = sha256
             seq.block_table.append(block_id)
 
     def deallocate(self, seq: Sequence):
