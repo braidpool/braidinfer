@@ -199,11 +199,13 @@ class ModelRunner:
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill):
-        # Check if we need eager mode due to filtering
+        # Check if we need eager mode due to context manager
         force_eager = False
         if hasattr(self.config, 'context_manager') and self.config.context_manager:
-            if self.config.context_manager.has_inactive_blocks():
-                force_eager = True  # CUDA graphs don't support dynamic filtering
+            # Force eager mode when context manager is active to avoid CUDA graph conflicts
+            if (self.config.context_manager.has_inactive_blocks() or 
+                len(self.config.context_manager.active_chunks) > 0):
+                force_eager = True  # CUDA graphs don't support dynamic filtering/context
                 
         if is_prefill or self.enforce_eager or force_eager or input_ids.size(0) > 512:
             return self.model.compute_logits(self.model(input_ids, positions))

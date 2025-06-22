@@ -877,6 +877,17 @@ class ContextManager:
         
         return stats
     
+    def setup_generation_context(self):
+        """Set up context for generation with active chunks
+        
+        NOTE: When context manager is active with chunks, the system will automatically
+        use eager mode to avoid CUDA graph conflicts with dynamic block tables.
+        """
+        # Context setup is now handled by the model runner
+        # This method exists for API compatibility but the actual setup
+        # happens in prepare_prefill/prepare_decode methods
+        pass
+
     def build_prompt_with_context(self, messages: List[Dict[str, str]], tokenizer) -> str:
         """Build a prompt that includes active context chunks as system messages
         

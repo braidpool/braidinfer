@@ -20,17 +20,27 @@ from rich.color import Color
 
 def ensure_weights(repo_id: str, local_dir: Path):
     """
-    Download the repo from Hugging Face into local_dir if no .bin weights are present.
+    Download the repo from Hugging Face into local_dir if model files are not present.
     """
-    # Check for any .bin files in the target folder
-    if not local_dir.exists() or not any(local_dir.glob("*.bin")):
+    # Check if model directory exists and has required files
+    if not local_dir.exists():
+        needs_download = True
+    else:
+        # Check for model weight files (.safetensors or .bin)
+        has_weights = any(local_dir.glob("*.safetensors")) or any(local_dir.glob("*.bin"))
+        # Check for config file
+        has_config = (local_dir / "config.json").exists()
+        needs_download = not (has_weights and has_config)
+    
+    if needs_download:
         print(f"⏬ Downloading weights for {repo_id} into {local_dir} …")
         local_dir.mkdir(parents=True, exist_ok=True)
         snapshot_download(
             repo_id=repo_id,
             repo_type="model",
             local_dir=str(local_dir),
-            cache_dir=str(local_dir)
+            cache_dir=str(local_dir),
+            resume_download=True
         )
     else:
         print(f"✅ Weights already present in {local_dir}, skipping download.")
@@ -399,6 +409,8 @@ def main():
 
                 # Use context manager to build prompt with active chunks
                 if context_mgr and len(context_mgr.active_chunks) > 0:
+                    # Set up the generation context first
+                    context_mgr.setup_generation_context()
                     formatted_prompt = context_mgr.build_prompt_with_context(
                         [{"role": "user", "content": user_input}],
                         tokenizer
