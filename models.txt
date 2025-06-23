@@ -1,0 +1,27 @@
+Qwen3:0.6B
+    FP8 weight_scale_inv problem
+    GPTQ-Int8
+        [rank0]: AttributeError: RowParallelLinear has no attribute `g_idx`
+
+Qwen3:30b   Doesn't know how to handle MOE
+
+Outputs are NOT in the active KV cache
+Integrate KV cache and dynamic graph tests with test harness
+Why isn't this using the repl loop from rich?
+We really should be doing:
+S   <|im_start|>system
+S   You are a helpful assistant.
+S   <|im_end|>
+S   <|im_start|>user
+       ... context chunks ...
+       ... context chunks ...
+       ... context chunks ...
+    <|im_end|>
+    <|im_start|>assistant
+e.g. the first 4 lines marked by S should be part of the SYSTEM prompt
+
+Fix the
+
+Review the TODO file
+
+Fix streaming

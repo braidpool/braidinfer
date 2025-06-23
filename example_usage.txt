@@ -1,0 +1,76 @@
+# Pure Context Management CLI - Example Usage
+
+## Basic Usage
+
+```
+$ python cli.py
+
+🤖 Nano-vLLM Context Manager
+Type text to add it as a chunk to the context
+Type '/infer' to run inference on the active context
+Type '/help' for all commands
+Type 'quit', 'exit', or press Ctrl+C to exit
+
+> The capital of France is Paris.
+✓ Added chunk: 216e0ff389beca0e... (7 tokens)
+
+> The capital of Germany is Berlin.
+✓ Added chunk: 3b26412cf018d412... (7 tokens)
+
+> /context
+[Shows table with 2 active chunks]
+
+> /infer What are the capitals mentioned?
+Running inference on 2 blocks (14 tokens) + 6 new tokens...
+The capitals mentioned are Paris (France) and Berlin (Germany).
+
+Generated 15 tokens in 0.9s (16.7 tok/s)
+✓ Output saved as chunk: abc123... (15 tokens)
+
+> /show 216e0ff
+[Shows: "The capital of France is Paris."]
+
+> exit
+👋 Goodbye!
+```
+
+## Advanced Usage
+
+### Loading Files
+```
+> /load facts.txt
+✓ Added chunk: def456... (500 tokens)
+
+> Additional context about geography
+✓ Added chunk: ghi789... (8 tokens)
+
+> /deactivate ghi789
+✓ Chunk deactivated: ghi789...
+
+> /infer
+Running inference on 1 blocks (500 tokens)...
+[Inference runs only on facts.txt content]
+```
+
+### Managing Context
+```
+> /tag def456 geography
+✓ Tagged chunk def456... with 'geography'
+
+> /save def456
+✓ Chunk saved: def456...
+
+> /clear
+✓ All chunks cleared
+
+> /restore def456
+✓ Chunk restored: def456...
+```
+
+## Key Differences from Chat Mode
+
+1. **No Automatic Inference**: Text input adds chunks, doesn't trigger generation
+2. **Manual Control**: Use `/infer` when you want model output
+3. **Flexible Context**: Build, modify, and organize context before inference
+4. **No Conversation Tracking**: Each chunk is independent
+5. **Direct KV Cache Control**: See exactly what's in the cache with `/context`
