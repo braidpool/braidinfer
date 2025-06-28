@@ -1,5 +1,5 @@
 """
-Model runner using FlashInfer for attention.
+Model runner for nano-vllm.
 """
 
 import pickle
@@ -11,14 +11,14 @@ from multiprocessing.shared_memory import SharedMemory
 
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence
-from nanovllm.models.qwen3_flashinfer import Qwen3ForCausalLM
+from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
-from nanovllm.layers.flashinfer_attention import FlashInferAttention
+from nanovllm.layers.attention import Attention
 from nanovllm.utils.context import set_context, get_context, reset_context
 from nanovllm.utils.loader import load_model
 
 
-class FlashInferModelRunner:
+class ModelRunner:
     """Model runner that uses FlashInfer for attention operations."""
     
     def __init__(self, config: Config, rank: int, event: Event | list[Event]):
@@ -97,7 +97,7 @@ class FlashInferModelRunner:
             if hasattr(module, 'attn'):
                 # Replace the attention module
                 old_attn = module.attn
-                new_attn = FlashInferAttention(
+                new_attn = Attention(
                     num_heads=num_qo_heads,
                     head_dim=hf_config.head_dim,
                     scale=old_attn.scale,
@@ -114,7 +114,7 @@ class FlashInferModelRunner:
         # Connect wrappers and KV cache to attention layers
         layer_idx = 0
         for module in self.model.modules():
-            if isinstance(module, FlashInferAttention):
+            if isinstance(module, Attention):
                 module.prefill_wrapper = self.prefill_wrappers[layer_idx]
                 module.decode_wrapper = self.decode_wrappers[layer_idx]
                 module.kv_cache = page_manager.get_layer_kv_cache(layer_idx)

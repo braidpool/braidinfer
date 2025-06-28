@@ -1,5 +1,5 @@
 """
-FlashInfer-based page manager for nano-vllm.
+Page manager for nano-vllm.
 Manages page allocation and tracks page tables for sequences.
 """
 
@@ -11,8 +11,8 @@ from collections import deque
 from nanovllm.engine.sequence import Sequence
 
 
-class FlashInferPageManager:
-    """Page manager using FlashInfer's native page management."""
+class PageManager:
+    """Page manager for paged attention KV cache."""
     
     def __init__(self, 
                  num_pages: int,

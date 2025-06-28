@@ -2,7 +2,7 @@ from collections import deque
 
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence, SequenceStatus
-from nanovllm.engine.flashinfer_page_manager import FlashInferPageManager
+from nanovllm.engine.page_manager import PageManager
 
 
 class Scheduler:
@@ -12,9 +12,9 @@ class Scheduler:
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.eos = config.eos
         
-        # Create FlashInfer page manager
+        # Create page manager
         hf_config = config.hf_config
-        self.page_manager = FlashInferPageManager(
+        self.page_manager = PageManager(
             num_pages=config.num_kvcache_blocks,
             page_size=config.kvcache_block_size,
             num_layers=hf_config.num_hidden_layers,

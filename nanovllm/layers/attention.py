@@ -1,6 +1,5 @@
 """
-FlashInfer-based attention layer for nano-vllm.
-Uses FlashInfer's native paged attention APIs.
+Attention layer for nano-vllm using paged attention.
 """
 
 import torch
@@ -9,8 +8,8 @@ import flashinfer
 from nanovllm.utils.context import get_context
 
 
-class FlashInferAttention(nn.Module):
-    """Attention layer using FlashInfer's paged attention."""
+class Attention(nn.Module):
+    """Attention layer using paged attention."""
     
     def __init__(self,
                  num_heads: int,

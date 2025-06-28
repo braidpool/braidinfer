@@ -9,7 +9,7 @@ from nanovllm.config import Config
 from nanovllm.sampling_params import SamplingParams
 from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.scheduler import Scheduler
-from nanovllm.engine.flashinfer_model_runner import FlashInferModelRunner
+from nanovllm.engine.model_runner import ModelRunner
 
 
 class LLMEngine:
@@ -23,11 +23,11 @@ class LLMEngine:
         ctx = mp.get_context("spawn")
         for i in range(1, config.tensor_parallel_size):
             event = ctx.Event()
-            process = ctx.Process(target=FlashInferModelRunner, args=(config, i, event))
+            process = ctx.Process(target=ModelRunner, args=(config, i, event))
             process.start()
             self.ps.append(process)
             self.events.append(event)
-        self.model_runner = FlashInferModelRunner(config, 0, self.events)
+        self.model_runner = ModelRunner(config, 0, self.events)
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = self.tokenizer.eos_token_id
         self.scheduler = Scheduler(config)
