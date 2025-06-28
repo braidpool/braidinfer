@@ -3,7 +3,6 @@ Model loading and initialization for nano-vllm.
 """
 
 import torch
-import torch.distributed as dist
 from typing import Optional
 
 from nanovllm.config import Config
@@ -105,7 +104,7 @@ class ModelLoader:
         Args:
             config: Configuration object
             hf_config: HuggingFace model config
-            world_size: Number of distributed processes
+            world_size: Ignored, kept for compatibility
             block_size: Size of each KV cache block
             
         Returns:
@@ -117,8 +116,8 @@ class ModelLoader:
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         
-        # Calculate bytes per block
-        num_kv_heads = hf_config.num_key_value_heads // world_size
+        # Calculate bytes per block (single GPU, no division)
+        num_kv_heads = hf_config.num_key_value_heads
         # For FlashInfer: [num_layers, num_pages, 2, page_size, num_kv_heads, head_dim]
         block_bytes = (hf_config.num_hidden_layers * 2 * block_size * 
                       num_kv_heads * hf_config.head_dim * 

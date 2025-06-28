@@ -1,10 +1,8 @@
 """
-Model runner for nano-vllm.
+Model runner for single-GPU nano-vllm.
 """
 
 import torch
-import torch.distributed as dist
-from multiprocessing.synchronize import Event
 from typing import List, Optional
 
 from nanovllm.config import Config
@@ -12,31 +10,25 @@ from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.inference_context import InferenceContext
 from nanovllm.engine.wrapper_manager import WrapperManager
 from nanovllm.engine.model_loader import ModelLoader
-from nanovllm.engine.distributed_manager import DistributedManager
 from nanovllm.engine.errors import ErrorContext, handle_inference_error, InferenceError
 from nanovllm.engine.metrics import MetricsContext, get_metrics_collector
 from nanovllm.layers.sampler import Sampler
 
 
 class ModelRunner:
-    """Model runner that uses FlashInfer for attention operations."""
+    """Model runner that uses FlashInfer for attention operations on single GPU."""
     
-    def __init__(self, config: Config, rank: int, event: Event | list[Event]):
+    def __init__(self, config: Config):
         self.config = config
         self.hf_config = config.hf_config
         self.block_size = config.kvcache_block_size
         self.enforce_eager = config.enforce_eager
-        self.world_size = config.tensor_parallel_size
-        self.rank = rank
-        
-        # Initialize distributed communication
-        self.dist_manager = DistributedManager(self.world_size, rank, event)
         
         # FlashInfer page manager will be set by scheduler
         self.page_manager: Optional[object] = None
         
         # Setup CUDA device
-        torch.cuda.set_device(rank)
+        torch.cuda.set_device(0)
         default_dtype = torch.get_default_dtype()
         torch.set_default_dtype(self.hf_config.torch_dtype)
         torch.set_default_device("cuda")
@@ -46,8 +38,8 @@ class ModelRunner:
         self.sampler = ModelLoader.create_sampler()
         
         # Initialize wrapper manager
-        num_kv_heads = self.hf_config.num_key_value_heads // self.world_size
-        num_qo_heads = self.hf_config.num_attention_heads // self.world_size
+        num_kv_heads = self.hf_config.num_key_value_heads
+        num_qo_heads = self.hf_config.num_attention_heads
         
         self.wrapper_manager = WrapperManager(
             num_layers=self.hf_config.num_hidden_layers,
@@ -63,16 +55,12 @@ class ModelRunner:
         
         # Calculate KV cache blocks
         config.num_kvcache_blocks = ModelLoader.calculate_kvcache_blocks(
-            config, self.hf_config, self.world_size, self.block_size
+            config, self.hf_config, 1, self.block_size  # world_size=1 for single GPU
         )
         
         # Reset default device settings
         torch.set_default_device("cpu")
         torch.set_default_dtype(default_dtype)
-        
-        # Start worker loop for non-rank-0 processes
-        if self.world_size > 1 and rank != 0:
-            self.loop()
     
     def set_page_manager(self, page_manager):
         """Set the page manager and connect it to attention layers."""
@@ -80,24 +68,6 @@ class ModelRunner:
         
         # Setup attention layers with KV cache
         ModelLoader.setup_attention_layers(self.model, page_manager)
-    
-    def exit(self):
-        """Clean up and exit."""
-        self.dist_manager.cleanup()
-    
-    def loop(self):
-        """Worker loop for non-rank-0 processes."""
-        while True:
-            method_name, args = self.dist_manager.read_from_shared_memory()
-            method = getattr(self, method_name, None)
-            if method:
-                method(*args)
-            if method_name == "exit":
-                break
-    
-    def call(self, method_name: str, *args):
-        """Call method on all processes."""
-        return self.dist_manager.broadcast_method_call(self, method_name, *args)
     
     def get_metrics(self) -> dict:
         """Get current metrics summary."""
@@ -214,20 +184,17 @@ class ModelRunner:
                     input_ids, positions = self.prepare_decode(seqs)
                     cu_seqlens_q = None
                 
-                temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
+                temperatures = self.prepare_sample(seqs)
                 
                 logits = self.run_model(input_ids, positions, seqs, is_prefill, cu_seqlens_q)
                 
                 # Sample tokens
-                if self.rank == 0:
-                    if logits is None:
-                        raise InferenceError("No logits returned from model")
-                        
-                    try:
-                        token_ids = self.sampler(logits, temperatures).tolist()
-                    except Exception as e:
-                        raise InferenceError(f"Sampling failed: {str(e)}") from e
-                else:
-                    token_ids = None
+                if logits is None:
+                    raise InferenceError("No logits returned from model")
+                    
+                try:
+                    token_ids = self.sampler(logits, temperatures).tolist()
+                except Exception as e:
+                    raise InferenceError(f"Sampling failed: {str(e)}") from e
                 
                 return token_ids

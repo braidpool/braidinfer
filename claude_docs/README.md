@@ -20,6 +20,7 @@ This directory contains architectural analyses and implementation documentation 
 - **[flashinfer_analysis.md](flashinfer_analysis.md)** - FlashInfer library capabilities analysis
 - **[flashinfer_integration_status.md](flashinfer_integration_status.md)** - Current status of FlashInfer integration
 - **[cleanup_summary.md](cleanup_summary.md)** - Summary of code cleanup efforts
+- **[distributed_removal_summary.md](distributed_removal_summary.md)** - Summary of torch.distributed infrastructure removal
 
 ## Key Achievements
 
