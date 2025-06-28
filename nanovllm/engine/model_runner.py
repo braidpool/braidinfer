@@ -2,20 +2,20 @@
 Model runner for nano-vllm.
 """
 
-import pickle
 import torch
 import torch.distributed as dist
-import flashinfer
 from multiprocessing.synchronize import Event
-from multiprocessing.shared_memory import SharedMemory
+from typing import List, Optional
 
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence
-from nanovllm.models.qwen3 import Qwen3ForCausalLM
+from nanovllm.engine.inference_context import InferenceContext
+from nanovllm.engine.wrapper_manager import WrapperManager
+from nanovllm.engine.model_loader import ModelLoader
+from nanovllm.engine.distributed_manager import DistributedManager
+from nanovllm.engine.errors import ErrorContext, handle_inference_error, InferenceError
+from nanovllm.engine.metrics import MetricsContext, get_metrics_collector
 from nanovllm.layers.sampler import Sampler
-from nanovllm.layers.attention import Attention
-from nanovllm.utils.context import set_context, get_context, reset_context
-from nanovllm.utils.loader import load_model
 
 
 class ModelRunner:
@@ -23,184 +23,85 @@ class ModelRunner:
     
     def __init__(self, config: Config, rank: int, event: Event | list[Event]):
         self.config = config
-        hf_config = config.hf_config
+        self.hf_config = config.hf_config
         self.block_size = config.kvcache_block_size
         self.enforce_eager = config.enforce_eager
         self.world_size = config.tensor_parallel_size
         self.rank = rank
-        self.event = event
+        
+        # Initialize distributed communication
+        self.dist_manager = DistributedManager(self.world_size, rank, event)
         
         # FlashInfer page manager will be set by scheduler
-        self.page_manager = None
+        self.page_manager: Optional[object] = None
         
-        dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
+        # Setup CUDA device
         torch.cuda.set_device(rank)
         default_dtype = torch.get_default_dtype()
-        torch.set_default_dtype(hf_config.torch_dtype)
+        torch.set_default_dtype(self.hf_config.torch_dtype)
         torch.set_default_device("cuda")
         
-        # Load model
-        self.model = Qwen3ForCausalLM(hf_config)
-        load_model(self.model, config.model)
-        self.sampler = Sampler()
+        # Load model and sampler
+        self.model = ModelLoader.load_model(config)
+        self.sampler = ModelLoader.create_sampler()
         
-        # Replace attention layers with FlashInfer attention
-        self._replace_attention_layers(hf_config)
+        # Initialize wrapper manager
+        num_kv_heads = self.hf_config.num_key_value_heads // self.world_size
+        num_qo_heads = self.hf_config.num_attention_heads // self.world_size
         
-        # Initialize FlashInfer wrappers
-        workspace_size = 128 * 1024 * 1024  # 128MB
-        self.prefill_wrappers = []
-        self.decode_wrappers = []
+        self.wrapper_manager = WrapperManager(
+            num_layers=self.hf_config.num_hidden_layers,
+            num_qo_heads=num_qo_heads,
+            num_kv_heads=num_kv_heads,
+            head_dim=self.hf_config.head_dim,
+            page_size=self.block_size,
+            dtype=self.hf_config.torch_dtype
+        )
         
-        for layer_idx in range(hf_config.num_hidden_layers):
-            # Create wrappers for each layer
-            prefill_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-                float_workspace_buffer=torch.empty(workspace_size, dtype=torch.uint8, device="cuda"),
-                kv_layout="NHD"
-            )
-            decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-                float_workspace_buffer=torch.empty(workspace_size, dtype=torch.uint8, device="cuda"),
-                kv_layout="NHD",
-                use_tensor_cores=True
-            )
-            self.prefill_wrappers.append(prefill_wrapper)
-            self.decode_wrappers.append(decode_wrapper)
+        # Warmup model
+        ModelLoader.warmup_model(self.model)
         
-        self.warmup_model()
+        # Calculate KV cache blocks
+        config.num_kvcache_blocks = ModelLoader.calculate_kvcache_blocks(
+            config, self.hf_config, self.world_size, self.block_size
+        )
         
-        # Calculate number of KV cache blocks based on available GPU memory
-        self._calculate_kvcache_blocks(config, hf_config)
-        
-        if not self.enforce_eager:
-            # CUDA graphs support would need modification for FlashInfer
-            pass
-        
+        # Reset default device settings
         torch.set_default_device("cpu")
         torch.set_default_dtype(default_dtype)
         
-        if self.world_size > 1:
-            if rank == 0:
-                self.shm = SharedMemory(name="nanovllm", create=True, size=2**20)
-                dist.barrier()
-            else:
-                dist.barrier()
-                self.shm = SharedMemory(name="nanovllm")
-                self.loop()
-    
-    def _replace_attention_layers(self, hf_config):
-        """Replace model's attention layers with FlashInfer attention."""
-        layer_idx = 0
-        num_kv_heads = hf_config.num_key_value_heads // self.world_size
-        num_qo_heads = hf_config.num_attention_heads // self.world_size
-        
-        for module in self.model.modules():
-            if hasattr(module, 'attn'):
-                # Replace the attention module
-                old_attn = module.attn
-                new_attn = Attention(
-                    num_heads=num_qo_heads,
-                    head_dim=hf_config.head_dim,
-                    scale=old_attn.scale,
-                    num_kv_heads=num_kv_heads,
-                    layer_idx=layer_idx
-                )
-                module.attn = new_attn
-                layer_idx += 1
+        # Start worker loop for non-rank-0 processes
+        if self.world_size > 1 and rank != 0:
+            self.loop()
     
     def set_page_manager(self, page_manager):
         """Set the page manager and connect it to attention layers."""
         self.page_manager = page_manager
         
-        # Connect wrappers and KV cache to attention layers
-        layer_idx = 0
-        for module in self.model.modules():
-            if isinstance(module, Attention):
-                module.prefill_wrapper = self.prefill_wrappers[layer_idx]
-                module.decode_wrapper = self.decode_wrappers[layer_idx]
-                module.kv_cache = page_manager.get_layer_kv_cache(layer_idx)
-                module.model_runner = self
-                module.page_manager = page_manager
-                layer_idx += 1
+        # Setup attention layers with KV cache
+        ModelLoader.setup_attention_layers(self.model, page_manager)
     
     def exit(self):
-        if self.world_size > 1:
-            self.shm.close()
-            dist.barrier()
-            if self.rank == 0:
-                self.shm.unlink()
-        torch.cuda.synchronize()
-        dist.destroy_process_group()
+        """Clean up and exit."""
+        self.dist_manager.cleanup()
     
     def loop(self):
+        """Worker loop for non-rank-0 processes."""
         while True:
-            method_name, args = self.read_shm()
-            self.call(method_name, *args)
+            method_name, args = self.dist_manager.read_from_shared_memory()
+            method = getattr(self, method_name, None)
+            if method:
+                method(*args)
             if method_name == "exit":
                 break
     
-    def read_shm(self):
-        assert self.world_size > 1 and self.rank
-        self.event.wait()
-        n = int.from_bytes(self.shm.buf[0:4], "little")
-        method_name, *args = pickle.loads(self.shm.buf[4:n+4])
-        self.event.clear()
-        return method_name, args
+    def call(self, method_name: str, *args):
+        """Call method on all processes."""
+        return self.dist_manager.broadcast_method_call(self, method_name, *args)
     
-    def write_shm(self, method_name, *args):
-        assert self.world_size > 1 and not self.rank
-        data = pickle.dumps([method_name, *args])
-        n = len(data)
-        self.shm.buf[0:4] = n.to_bytes(4, "little")
-        self.shm.buf[4:n+4] = data
-        for event in self.event:
-            event.set()
-    
-    def call(self, method_name, *args):
-        if self.world_size > 1 and self.rank == 0:
-            self.write_shm(method_name, *args)
-        method = getattr(self, method_name, None)
-        return method(*args)
-    
-    def warmup_model(self):
-        """Warmup model with dummy data."""
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats()
-        
-        # Simple warmup without running full attention
-        dummy_seq_len = 128
-        dummy_input = torch.zeros(dummy_seq_len, dtype=torch.int64, device="cuda")
-        dummy_positions = torch.arange(dummy_seq_len, dtype=torch.int64, device="cuda")
-        
-        # Just run through embeddings to warmup
-        with torch.inference_mode():
-            _ = self.model.model.embed_tokens(dummy_input)
-        
-        torch.cuda.empty_cache()
-    
-    def _calculate_kvcache_blocks(self, config, hf_config):
-        """Calculate number of KV cache blocks based on available GPU memory."""
-        torch.cuda.empty_cache()
-        free, total = torch.cuda.mem_get_info()
-        used = total - free
-        peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
-        current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
-        
-        # Calculate bytes per block
-        num_kv_heads = hf_config.num_key_value_heads // self.world_size
-        # For FlashInfer: [num_layers, num_pages, 2, page_size, num_kv_heads, head_dim]
-        block_bytes = (hf_config.num_hidden_layers * 2 * self.block_size * 
-                      num_kv_heads * hf_config.head_dim * 
-                      hf_config.torch_dtype.itemsize)
-        
-        # Calculate available blocks
-        available_memory = total * config.gpu_memory_utilization - used - peak + current
-        config.num_kvcache_blocks = int(available_memory // block_bytes)
-        
-        # Ensure we have at least some blocks
-        if config.num_kvcache_blocks <= 0:
-            # Fallback to a minimal number
-            config.num_kvcache_blocks = 64
-            print(f"Warning: Low GPU memory, using minimal KV cache blocks: {config.num_kvcache_blocks}")
+    def get_metrics(self) -> dict:
+        """Get current metrics summary."""
+        return get_metrics_collector().get_summary()
     
     def prepare_prefill(self, seqs: list[Sequence]):
         """Prepare inputs for prefill stage."""
@@ -226,34 +127,14 @@ class ModelRunner:
         )
         
         # Plan prefill for all layers
-        hf_config = self.config.hf_config
-        num_kv_heads = hf_config.num_key_value_heads // self.world_size
-        num_qo_heads = hf_config.num_attention_heads // self.world_size
+        self.wrapper_manager.plan_prefill(q_indptr, kv_indptr, kv_indices, last_page_lens)
         
-        for wrapper in self.prefill_wrappers:
-            wrapper.plan(
-                q_indptr,
-                kv_indptr,
-                kv_indices,
-                last_page_lens,
-                num_qo_heads,
-                num_kv_heads,
-                hf_config.head_dim,
-                self.page_manager.page_size,
-                causal=True,
-                q_data_type=hf_config.torch_dtype,
-                kv_data_type=hf_config.torch_dtype
-            )
-        
-        # Set context for prefill
         # Build cu_seqlens_q which is cumulative sequence lengths for queries
         cu_seqlens_q = torch.zeros(len(seqs) + 1, dtype=torch.int32, device="cuda")
         for i, seq_len in enumerate(seq_lens):
             cu_seqlens_q[i + 1] = cu_seqlens_q[i] + seq_len
         
-        set_context(True, cu_seqlens_q=cu_seqlens_q)
-        
-        return input_ids, positions
+        return input_ids, positions, cu_seqlens_q
     
     def prepare_decode(self, seqs: list[Sequence]):
         """Prepare inputs for decode stage."""
@@ -273,25 +154,7 @@ class ModelRunner:
         )
         
         # Plan decode for all layers
-        hf_config = self.config.hf_config
-        num_kv_heads = hf_config.num_key_value_heads // self.world_size
-        num_qo_heads = hf_config.num_attention_heads // self.world_size
-        
-        for wrapper in self.decode_wrappers:
-            wrapper.plan(
-                kv_indptr,
-                kv_indices,
-                last_page_lens,
-                num_qo_heads,
-                num_kv_heads,
-                hf_config.head_dim,
-                self.page_manager.page_size,
-                kv_data_type=hf_config.torch_dtype,
-                q_data_type=hf_config.torch_dtype
-            )
-        
-        # Set context for decode
-        set_context(False)
+        self.wrapper_manager.plan_decode(kv_indptr, kv_indices, last_page_lens)
         
         return input_ids, positions
     
@@ -304,44 +167,67 @@ class ModelRunner:
         return temperatures
     
     @torch.inference_mode()
+    @handle_inference_error
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, 
-                  seqs: list[Sequence], is_prefill: bool):
+                  seqs: list[Sequence], is_prefill: bool, cu_seqlens_q: torch.Tensor = None):
         """Run model forward pass with K/V caching."""
-        # Store sequences in context for K/V appending
-        self.current_seqs = seqs
-        self.current_is_prefill = is_prefill
-        
-        # Run model forward - K/V will be appended inside attention layers
-        hidden_states = self.model(input_ids, positions)
-        logits = self.model.compute_logits(hidden_states)
-        
-        # Update sequence lengths after all layers have processed
-        self.page_manager.update_sequence_lengths(seqs, is_prefill)
-        
-        return logits
+        with ErrorContext("model forward pass", 
+                         is_prefill=is_prefill, 
+                         num_seqs=len(seqs),
+                         input_shape=input_ids.shape):
+            # Create inference context
+            context = InferenceContext(
+                is_prefill=is_prefill,
+                sequences=seqs,
+                cu_seqlens_q=cu_seqlens_q,
+                prefill_wrappers=self.wrapper_manager.prefill_wrappers if is_prefill else None,
+                decode_wrappers=self.wrapper_manager.decode_wrappers if not is_prefill else None,
+                page_manager=self.page_manager
+            )
+            
+            # Run model forward - K/V will be appended inside attention layers
+            hidden_states = self.model(input_ids, positions, context)
+            logits = self.model.compute_logits(hidden_states, context)
+            
+            # Update sequence lengths after all layers have processed
+            self.page_manager.update_sequence_lengths(seqs, is_prefill)
+            
+            return logits
     
+    @handle_inference_error
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
         """Run inference for a batch of sequences."""
+        # Generate request ID based on sequence IDs
+        request_id = f"{'prefill' if is_prefill else 'decode'}_{seqs[0].seq_id}_{len(seqs)}"
+        
+        # Calculate total tokens
         if is_prefill:
-            input_ids, positions = self.prepare_prefill(seqs)
+            num_tokens = sum(len(seq) for seq in seqs)
         else:
-            input_ids, positions = self.prepare_decode(seqs)
+            num_tokens = len(seqs)  # One token per sequence in decode
         
-        temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
-        
-        logits = self.run_model(input_ids, positions, seqs, is_prefill)
-        
-        # Sample tokens
-        if self.rank == 0:
-            if is_prefill:
-                # For prefill, ParallelLMHead already returns only last token logits
-                # No need to index again
-                token_ids = self.sampler(logits, temperatures).tolist()
-            else:
-                # For decode, we have one logit per sequence
-                token_ids = self.sampler(logits, temperatures).tolist()
-        else:
-            token_ids = None
-        
-        reset_context()
-        return token_ids
+        with MetricsContext(request_id, is_prefill, len(seqs), num_tokens):
+            with ErrorContext("inference run", is_prefill=is_prefill, num_seqs=len(seqs)):
+                if is_prefill:
+                    input_ids, positions, cu_seqlens_q = self.prepare_prefill(seqs)
+                else:
+                    input_ids, positions = self.prepare_decode(seqs)
+                    cu_seqlens_q = None
+                
+                temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
+                
+                logits = self.run_model(input_ids, positions, seqs, is_prefill, cu_seqlens_q)
+                
+                # Sample tokens
+                if self.rank == 0:
+                    if logits is None:
+                        raise InferenceError("No logits returned from model")
+                        
+                    try:
+                        token_ids = self.sampler(logits, temperatures).tolist()
+                    except Exception as e:
+                        raise InferenceError(f"Sampling failed: {str(e)}") from e
+                else:
+                    token_ids = None
+                
+                return token_ids

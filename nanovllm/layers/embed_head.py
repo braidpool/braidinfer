@@ -2,8 +2,10 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 import torch.distributed as dist
+from typing import TYPE_CHECKING, Optional
 
-from nanovllm.utils.context import get_context
+if TYPE_CHECKING:
+    from nanovllm.engine.inference_context import InferenceContext
 
 
 class VocabParallelEmbedding(nn.Module):
@@ -58,9 +60,8 @@ class ParallelLMHead(VocabParallelEmbedding):
         else:
             self.register_parameter("bias", None)
 
-    def forward(self, x: torch.Tensor):
-        context = get_context()
-        if context.is_prefill:
+    def forward(self, x: torch.Tensor, context: Optional['InferenceContext'] = None):
+        if context is not None and context.is_prefill:
             last_indices = context.cu_seqlens_q[1:] - 1
             x = x[last_indices].contiguous()
         logits = F.linear(x, self.weight, self.bias)
