@@ -16,6 +16,13 @@ class Config:
     eos: int = -1
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
+    
+    # Cascade attention configuration
+    enable_cascade_attention: bool = False
+    chunk_page_ratio: float = 0.5  # Fraction of pages reserved for chunks
+    max_cascade_levels: int = 3
+    chunk_registry_size: int = 1000
+    chunk_persistence_dir: str | None = None
 
     def __post_init__(self):
         assert os.path.isdir(self.model)
