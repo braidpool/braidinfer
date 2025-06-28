@@ -3,7 +3,7 @@ from torch import nn
 import triton
 import triton.language as tl
 
-from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+import flashinfer
 from nanovllm.utils.context import get_context
 
 
@@ -54,6 +54,7 @@ class Attention(nn.Module):
         self.scale = scale
         self.num_kv_heads = num_kv_heads
         self.k_cache = self.v_cache = torch.tensor([])
+        self.block_size = 256  # Default block size from nano-vllm
 
     def forward(self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor):
         o: torch.Tensor
@@ -67,13 +68,58 @@ class Attention(nn.Module):
         if context.is_prefill:
             if context.block_tables is not None:    # prefix cache
                 k, v = k_cache, v_cache
-            o = flash_attn_varlen_func(q, k, v,
-                                       max_seqlen_q=context.max_seqlen_q, cu_seqlens_q=context.cu_seqlens_q,
-                                       max_seqlen_k=context.max_seqlen_k, cu_seqlens_k=context.cu_seqlens_k,
-                                       softmax_scale=self.scale, causal=True, block_table=context.block_tables)
+            # Use flashinfer's single prefill for now (will migrate to batch later)
+            # Reshape tensors to match flashinfer's expected format
+            total_q = q.shape[0]
+            total_kv = k.shape[0]
+            
+            # For prefill, flashinfer expects flattened tensors with cumulative lengths
+            o = flashinfer.single_prefill_with_kv_cache(
+                q=q,  # [total_q, num_heads, head_dim]
+                k=k,  # [total_kv, num_kv_heads, head_dim]
+                v=v,  # [total_kv, num_kv_heads, head_dim]
+                kv_layout="NHD",  # Using NHD layout to match current tensor format
+                pos_encoding_mode="NONE",  # Will add RoPE support later
+                sm_scale=self.scale,
+                causal=True,
+            )
         else:    # decode
-            o = flash_attn_with_kvcache(q.unsqueeze(1), k_cache, v_cache,
-                                        cache_seqlens=context.context_lens, block_table=context.block_tables, 
-                                        softmax_scale=self.scale, causal=True)
+            # For decode, we need to reshape the paged KV cache to match flashinfer's expectations
+            # k_cache and v_cache are [num_blocks, block_size, num_kv_heads, head_dim]
+            # We need to flatten them to [total_kv_len, num_kv_heads, head_dim]
+            
+            # Get the actual KV length from context
+            if hasattr(context, 'context_lens') and context.context_lens.numel() > 0:
+                kv_len = context.context_lens[0].item()
+                # Calculate how many blocks are actually used
+                num_blocks_used = (kv_len + self.block_size - 1) // self.block_size
+                
+                # Reshape cache to contiguous format for now (will optimize with paged later)
+                k_flat = k_cache[:num_blocks_used].reshape(-1, self.num_kv_heads, self.head_dim)[:kv_len]
+                v_flat = v_cache[:num_blocks_used].reshape(-1, self.num_kv_heads, self.head_dim)[:kv_len]
+            else:
+                # Fallback: use all available cache
+                k_flat = k_cache.reshape(-1, self.num_kv_heads, self.head_dim)
+                v_flat = v_cache.reshape(-1, self.num_kv_heads, self.head_dim)
+            
+            # Process all queries in the batch
+            outputs = []
+            for i in range(q.shape[0]):
+                q_single = q[i]  # [num_heads, head_dim]
+                
+                # Use flashinfer's single decode
+                o_single = flashinfer.single_decode_with_kv_cache(
+                    q=q_single,  # [num_heads, head_dim]
+                    k=k_flat,    # [kv_len, num_kv_heads, head_dim]
+                    v=v_flat,    # [kv_len, num_kv_heads, head_dim]
+                    kv_layout="NHD",
+                    pos_encoding_mode="NONE",
+                    sm_scale=self.scale,
+                )
+                outputs.append(o_single)
+            
+            # Stack outputs
+            o = torch.stack(outputs, dim=0)
+                
         o = o.view(-1, self.num_heads * self.head_dim)
         return o
