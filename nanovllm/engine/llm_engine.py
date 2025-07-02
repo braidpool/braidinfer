@@ -13,6 +13,7 @@ from nanovllm.sampling_params import SamplingParams
 from nanovllm.engine.sequence import Sequence, SequenceStatus
 from nanovllm.engine.scheduler import Scheduler
 from nanovllm.engine.model_runner import ModelRunner
+from nanovllm.engine.cascade_request import CascadeRequestBuilder
 
 
 class LLMEngine:
@@ -35,11 +36,33 @@ class LLMEngine:
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = self.tokenizer.eos_token_id
         
-        # Initialize scheduler
-        self.scheduler = Scheduler(config)
+        # Initialize appropriate scheduler based on cascade attention setting
+        if getattr(config, 'enable_cascade_attention', False):
+            # Check if we want persistent output support
+            if getattr(config, 'enable_persistent_output', True):
+                from nanovllm.engine.persistent_cascade_scheduler import PersistentCascadeScheduler
+                self.scheduler = PersistentCascadeScheduler(config)
+                print("Using PersistentCascadeScheduler for cascade attention with output reuse")
+            else:
+                from nanovllm.engine.cascade_scheduler import CascadeScheduler
+                self.scheduler = CascadeScheduler(config)
+                print("Using CascadeScheduler for cascade attention")
+        else:
+            self.scheduler = Scheduler(config)
         
         # Connect page manager to model runner
         self.model_runner.set_page_manager(self.scheduler.page_manager)
+        
+        # Create cascade request builder if cascade is enabled
+        self.cascade_enabled = getattr(config, 'enable_cascade_attention', False)
+        if self.cascade_enabled:
+            self.cascade_builder = CascadeRequestBuilder(self.tokenizer)
+        
+        # Store config for later reference
+        self.config = config
+        
+        # Initialize timing stats
+        self._timing_stats = []
         
         # Register cleanup
         atexit.register(self.exit)
@@ -52,10 +75,33 @@ class LLMEngine:
 
     def add_request(self, prompt: str | list[int], sampling_params: SamplingParams):
         """Add a new request to the scheduler."""
-        if isinstance(prompt, str):
-            prompt = self.tokenizer.encode(prompt)
-        seq = Sequence(prompt, sampling_params)
+        if self.cascade_enabled:
+            # Use cascade sequence for compatibility
+            seq = self.cascade_builder.build_simple_cascade_sequence(prompt, sampling_params)
+        else:
+            if isinstance(prompt, str):
+                prompt = self.tokenizer.encode(prompt)
+            seq = Sequence(prompt, sampling_params)
         self.scheduler.add(seq)
+    
+    def add_cascade_request(self, system_prompt: str | None, context_chunks: list[str], 
+                           query: str, sampling_params: SamplingParams):
+        """Add a cascade request with explicit chunk composition."""
+        if not self.cascade_enabled:
+            # Fall back to regular request with combined prompt
+            parts = []
+            if system_prompt:
+                parts.append(system_prompt)
+            parts.extend(context_chunks)
+            parts.append(query)
+            prompt = "\n\n".join(parts)
+            self.add_request(prompt, sampling_params)
+        else:
+            # Build cascade sequence with chunks
+            cascade_seq = self.cascade_builder.build_cascade_sequence(
+                system_prompt, context_chunks, query, sampling_params
+            )
+            self.scheduler.add(cascade_seq)
 
     def step(self) -> list[Sequence]:
         """Run one step of inference."""

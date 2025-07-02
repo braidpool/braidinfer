@@ -59,6 +59,7 @@ class CascadeScheduler(Scheduler):
         
         # Tracking for chunk-based grouping
         self.chunk_groups: Dict[frozenset, List[Sequence]] = defaultdict(list)
+        self._current_cascade_config: Optional[CascadeConfig] = None
     
     def add(self, seq: Sequence):
         """Add sequence and register its chunks if cascade enabled."""
@@ -89,7 +90,7 @@ class CascadeScheduler(Scheduler):
         
         super().add(seq)
     
-    def schedule(self) -> Tuple[List[Sequence], bool, Optional[CascadeConfig]]:
+    def schedule(self) -> Tuple[List[Sequence], bool]:
         """
         Schedule sequences with cascade-aware batching.
         
@@ -100,20 +101,23 @@ class CascadeScheduler(Scheduler):
         """
         if not self.enable_cascade:
             # Fall back to regular scheduling
-            seqs, is_prefill = super().schedule()
-            return seqs, is_prefill, None
+            return super().schedule()
         
         # Try cascade-aware prefill scheduling
         scheduled_seqs, cascade_config = self._schedule_cascade_prefill()
         if scheduled_seqs:
-            return scheduled_seqs, True, cascade_config
+            # Store cascade config for later use
+            self._current_cascade_config = cascade_config
+            return scheduled_seqs, True
         
         # Try cascade-aware decode scheduling
         scheduled_seqs, cascade_config = self._schedule_cascade_decode()
         if scheduled_seqs:
-            return scheduled_seqs, False, cascade_config
+            # Store cascade config for later use
+            self._current_cascade_config = cascade_config
+            return scheduled_seqs, False
         
-        return [], False, None
+        return [], False
     
     def _schedule_cascade_prefill(self) -> Tuple[List[Sequence], Optional[CascadeConfig]]:
         """Schedule prefill with cascade grouping."""
@@ -145,7 +149,16 @@ class CascadeScheduler(Scheduler):
         
         if not best_seqs:
             # Fall back to regular prefill if no good cascade group
-            return self._fallback_prefill()
+            # Just schedule one sequence at a time without cascade
+            if self.waiting:
+                seq = self.waiting[0]
+                if self.page_manager.can_allocate(seq):
+                    self.page_manager.allocate(seq)
+                    seq.status = SequenceStatus.RUNNING
+                    self.waiting.popleft()
+                    self.running.append(seq)
+                    return [seq], None
+            return [], None
         
         # Schedule the best group
         scheduled_seqs = []
@@ -358,6 +371,18 @@ class CascadeScheduler(Scheduler):
         # First run parent postprocess
         super().postprocess(seqs, token_ids)
         
-        # Update sequence lengths in page manager for cascade tracking
-        is_prefill = all(seq.status == SequenceStatus.RUNNING and len(seq) > 1 for seq in seqs)
-        self.page_manager.update_sequence_lengths(seqs, is_prefill)
+        # Only update lengths for allocated sequences to avoid KeyError
+        if hasattr(self.page_manager, 'seq_lengths') and hasattr(self.page_manager, 'seq_page_tables'):
+            for seq in seqs:
+                if seq.seq_id in self.page_manager.seq_page_tables:
+                    # Sequence is allocated, safe to update
+                    # Determine if this is prefill based on the sequence state
+                    is_prefill = seq.num_tokens == len(seq)
+                    if is_prefill:
+                        self.page_manager.seq_lengths[seq.seq_id] = len(seq)
+                    else:
+                        if seq.seq_id in self.page_manager.seq_lengths:
+                            self.page_manager.seq_lengths[seq.seq_id] += 1
+                        else:
+                            # Initialize if missing (shouldn't happen, but be safe)
+                            self.page_manager.seq_lengths[seq.seq_id] = len(seq)
