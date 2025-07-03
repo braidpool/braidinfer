@@ -36,20 +36,23 @@ class WrapperManager:
         self.page_size = page_size
         self.dtype = dtype
         
+        # Create shared workspace buffer for all layers
+        self.shared_workspace_buffer = torch.empty(workspace_size, dtype=torch.uint8, device="cuda")
+        
         # Create wrappers for each layer
         self.prefill_wrappers: List[flashinfer.BatchPrefillWithPagedKVCacheWrapper] = []
         self.decode_wrappers: List[flashinfer.BatchDecodeWithPagedKVCacheWrapper] = []
         
         for _ in range(num_layers):
-            # Create prefill wrapper
+            # Create prefill wrapper with shared workspace
             prefill_wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(
-                float_workspace_buffer=torch.empty(workspace_size, dtype=torch.uint8, device="cuda"),
+                float_workspace_buffer=self.shared_workspace_buffer,
                 kv_layout="NHD"
             )
             
-            # Create decode wrapper
+            # Create decode wrapper with shared workspace
             decode_wrapper = flashinfer.BatchDecodeWithPagedKVCacheWrapper(
-                float_workspace_buffer=torch.empty(workspace_size, dtype=torch.uint8, device="cuda"),
+                float_workspace_buffer=self.shared_workspace_buffer,
                 kv_layout="NHD",
                 use_tensor_cores=True
             )

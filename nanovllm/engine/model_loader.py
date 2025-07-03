@@ -9,6 +9,7 @@ from nanovllm.config import Config
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.layers.attention import Attention
+from nanovllm.layers.flashinfer_cascade_attention import FlashInferCascadeAttention
 from nanovllm.utils.loader import load_model
 from nanovllm.engine.errors import ModelLoadError, MemoryError, ErrorContext
 
@@ -34,7 +35,14 @@ class ModelLoader:
             
             # Create model instance
             try:
+                # Create model instance
                 model = Qwen3ForCausalLM(hf_config)
+                
+                # Set cascade attention flag on model layers if enabled
+                if getattr(config, 'enable_cascade_attention', False):
+                    for module in model.modules():
+                        if hasattr(module, 'attn'):
+                            module._use_cascade_attention = True
             except Exception as e:
                 raise ModelLoadError(f"Failed to create model instance: {str(e)}") from e
             
@@ -67,7 +75,7 @@ class ModelLoader:
         layer_count = 0
         
         for module in model.modules():
-            if isinstance(module, Attention):
+            if isinstance(module, (Attention, FlashInferCascadeAttention)):
                 # Set KV cache reference
                 module.kv_cache = page_manager.get_layer_kv_cache(layer_count)
                 layer_count += 1
