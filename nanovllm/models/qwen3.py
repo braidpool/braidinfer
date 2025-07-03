@@ -8,6 +8,7 @@ from transformers import Qwen3Config
 
 from nanovllm.layers.activation import SiluAndMul
 from nanovllm.layers.attention import Attention
+from nanovllm.layers.flashinfer_cascade_attention import FlashInferCascadeAttention
 from nanovllm.layers.layernorm import RMSNorm
 from nanovllm.layers.linear import QKVParallelLinear, MergedColumnParallelLinear, RowParallelLinear
 from nanovllm.layers.rotary_embedding import get_rope
@@ -67,13 +68,26 @@ class Qwen3Attention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            self.num_kv_heads,
-            self.layer_idx,
-        )
+        # Check if cascade attention should be used
+        # This is set by the model loader based on config
+        use_cascade = getattr(self, '_use_cascade_attention', False)
+        
+        if use_cascade:
+            self.attn = FlashInferCascadeAttention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                self.num_kv_heads,
+                self.layer_idx
+            )
+        else:
+            self.attn = Attention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                self.num_kv_heads,
+                self.layer_idx,
+            )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 

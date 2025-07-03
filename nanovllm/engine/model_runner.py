@@ -41,6 +41,7 @@ class ModelRunner:
         num_kv_heads = self.hf_config.num_key_value_heads
         num_qo_heads = self.hf_config.num_attention_heads
         
+        # Initialize wrapper manager
         self.wrapper_manager = WrapperManager(
             num_layers=self.hf_config.num_hidden_layers,
             num_qo_heads=num_qo_heads,
@@ -139,7 +140,8 @@ class ModelRunner:
     @torch.inference_mode()
     @handle_inference_error
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, 
-                  seqs: list[Sequence], is_prefill: bool, cu_seqlens_q: torch.Tensor = None):
+                  seqs: list[Sequence], is_prefill: bool, cu_seqlens_q: torch.Tensor = None,
+                  cascade_data=None):
         """Run model forward pass with K/V caching."""
         with ErrorContext("model forward pass", 
                          is_prefill=is_prefill, 
@@ -152,7 +154,8 @@ class ModelRunner:
                 cu_seqlens_q=cu_seqlens_q,
                 prefill_wrappers=self.wrapper_manager.prefill_wrappers if is_prefill else None,
                 decode_wrappers=self.wrapper_manager.decode_wrappers if not is_prefill else None,
-                page_manager=self.page_manager
+                page_manager=self.page_manager,
+                cascade_data=cascade_data
             )
             
             # Run model forward - K/V will be appended inside attention layers
@@ -165,7 +168,7 @@ class ModelRunner:
             return logits
     
     @handle_inference_error
-    def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
+    def run(self, seqs: list[Sequence], is_prefill: bool, cascade_data=None) -> list[int]:
         """Run inference for a batch of sequences."""
         # Generate request ID based on sequence IDs
         request_id = f"{'prefill' if is_prefill else 'decode'}_{seqs[0].seq_id}_{len(seqs)}"
@@ -186,7 +189,7 @@ class ModelRunner:
                 
                 temperatures = self.prepare_sample(seqs)
                 
-                logits = self.run_model(input_ids, positions, seqs, is_prefill, cu_seqlens_q)
+                logits = self.run_model(input_ids, positions, seqs, is_prefill, cu_seqlens_q, cascade_data=cascade_data)
                 
                 # Sample tokens
                 if logits is None:

@@ -8,8 +8,6 @@ import torch
 
 from nanovllm.engine.sequence import Sequence
 
-if TYPE_CHECKING:
-    from nanovllm.layers.cascade_attention import CascadeConfig
 
 
 @dataclass
@@ -32,8 +30,8 @@ class InferenceContext:
     # Page manager reference
     page_manager: Optional[object] = None
     
-    # Cascade attention configuration
-    cascade_config: Optional['CascadeConfig'] = None
+    # Cascade attention data
+    cascade_data: Optional[dict] = None
     
     # Workspace buffer for cascade attention
     _workspace_buffer: Optional[torch.Tensor] = None

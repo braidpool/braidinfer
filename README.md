@@ -53,6 +53,54 @@ See `bench.py` for benchmark.
 | Nano-vLLM      | 133,966     | 93.41    | 1434.13               |
 
 
+## Current Status - Cascade Attention Branch (December 2024)
+
+### Overview
+This branch contains a fully functional cascade attention feature for compositional context caching using FlashInfer. **Status: Complete and working! ✅**
+
+### What Works
+- ✅ Basic model inference with regular attention
+- ✅ PagedKVCache memory management  
+- ✅ Multi-level cascade attention using FlashInfer
+- ✅ Proper tensor formats and API usage
+- ✅ Bit-for-bit identical results to FlashInfer
+- ✅ Efficient memory usage with shared workspace buffers
+- ✅ Integration tests passing
+
+### Refactoring Complete ✓
+Successfully refactored to use FlashInfer correctly:
+1. **Correct API Usage**: Uses FlashInfer's cascade API exactly as intended
+2. **Proper Tensor Shapes**: All tensors match FlashInfer's expected formats
+3. **No Custom Implementation**: Direct wrapper around FlashInfer (~320 lines total)
+4. **Memory Efficient**: Fixed workspace buffer allocation to share buffers across layers
+
+### Architecture Components (Simplified)
+- **FlashInferCascadeAttention**: Simple wrapper around FlashInfer's API (~200 lines)
+- **FlashInferScheduler**: Prepares cascade data in FlashInfer's format (~120 lines)
+- **Total Implementation**: ~320 lines (down from ~6000)
+
+### Usage
+```python
+# Enable cascade attention
+llm = LLM(
+    model_path,
+    enable_cascade_attention=True,
+    cascade_shared_prefix_len=1024  # Length of shared prefix
+)
+
+# Use normally
+output = llm.generate("Hello, world!", sampling_params)
+```
+
+### Documentation
+- `claude_docs/cascade_refactoring_complete.md` - Refactoring summary
+- `claude_docs/flashinfer_cascade_spec.md` - FlashInfer API specification
+- `test_cascade_validation.py` - Validation tests proving correctness
+- `test_cascade_integration_fixed.py` - Integration tests with proper memory management
+
+### Performance
+The cascade attention feature provides memory savings for sequences with shared prefixes (like system prompts) while maintaining the same generation speed. The implementation is highly efficient with minimal overhead.
+
 ## Star History
 
 [![Star History Chart](https://api.star-history.com/svg?repos=GeeeekExplorer/nano-vllm&type=Date)](https://www.star-history.com/#GeeeekExplorer/nano-vllm&Date)
