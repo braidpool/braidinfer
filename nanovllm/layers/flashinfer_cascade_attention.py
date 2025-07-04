@@ -35,9 +35,9 @@ class FlashInferCascadeAttention(nn.Module):
         # Reference to paged KV cache (set by model runner)
         self.kv_cache = None
         
-        # Workspace buffer - FlashInfer recommends 128MB
+        # Workspace buffer - reduced for small models
         self.workspace_buffer = torch.empty(
-            128 * 1024 * 1024, dtype=torch.uint8, device="cuda"
+            32 * 1024 * 1024, dtype=torch.uint8, device="cuda"
         )
         
         # Cascade wrapper - created on demand

@@ -104,9 +104,10 @@ class TestSequenceLengthUpdate(unittest.TestCase):
         self.assertEqual(len(indices), expected_pages,
                         f"Should have {expected_pages} pages for {len(tokens)} tokens")
         
-        # Last page should have 4 tokens
-        self.assertEqual(last_page_lens[0], 4,
-                        "Last page should have 4 tokens")
+        # For decode, we're adding 1 token to existing 20 = 21 total
+        # 21 tokens means last page has 5 tokens (21 % 16 = 5)
+        self.assertEqual(last_page_lens[0].item(), 5,
+                        "Last page should have 5 tokens after adding 1 for decode")
 
 
 if __name__ == '__main__':

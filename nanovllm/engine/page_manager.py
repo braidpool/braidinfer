@@ -35,9 +35,10 @@ class PageManager:
         self.seq_page_tables: Dict[int, List[int]] = {}
         
         # Allocate KV cache for all layers
-        # Shape: [num_layers, num_pages, 2, page_size, num_kv_heads, head_dim]
+        # Shape: [num_layers, num_pages, 2, num_kv_heads, page_size, head_dim]
+        # This is HND format for FlashInfer
         self.kv_cache = torch.zeros(
-            num_layers, num_pages, 2, page_size, num_kv_heads, head_dim,
+            num_layers, num_pages, 2, num_kv_heads, page_size, head_dim,
             dtype=dtype, device="cuda"
         )
         
@@ -195,7 +196,7 @@ class PageManager:
             kv_indices,
             kv_indptr,
             last_page_lens,
-            kv_layout="NHD"
+            kv_layout="HND"
         )
         
         # Update sequence lengths only after all layers are processed

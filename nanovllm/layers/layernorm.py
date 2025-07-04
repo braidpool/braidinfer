@@ -2,6 +2,24 @@ import torch
 from torch import nn
 
 
+class LayerNorm(nn.Module):
+    """Standard LayerNorm used by models like GPT-2."""
+
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-5,
+    ) -> None:
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.bias = nn.Parameter(torch.zeros(hidden_size))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.layer_norm(x, (self.hidden_size,), self.weight, self.bias, self.eps)
+
+
 class RMSNorm(nn.Module):
 
     def __init__(

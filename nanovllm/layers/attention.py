@@ -51,8 +51,14 @@ class Attention(nn.Module):
         if wrapper is None:
             raise RuntimeError(f"Wrapper not initialized for layer {self.layer_idx}")
         
+        # Get layer-specific KV cache
+        if context.page_manager is not None:
+            layer_kv_cache = context.page_manager.get_layer_kv_cache(self.layer_idx)
+        else:
+            layer_kv_cache = self.kv_cache
+        
         # Run attention
-        output = wrapper.run(q, self.kv_cache)
+        output = wrapper.run(q, layer_kv_cache)
         
         # Reshape output back to [seq_len, hidden_dim]
         output = output.view(-1, self.num_heads * self.head_dim)

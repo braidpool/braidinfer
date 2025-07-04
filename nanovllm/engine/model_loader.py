@@ -7,6 +7,7 @@ from typing import Optional
 
 from nanovllm.config import Config
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
+from nanovllm.models.gpt2 import GPT2ForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.layers.attention import Attention
 from nanovllm.layers.flashinfer_cascade_attention import FlashInferCascadeAttention
@@ -33,10 +34,16 @@ class ModelLoader:
         with ErrorContext("model loading", model_path=config.model):
             hf_config = config.hf_config
             
-            # Create model instance
+            # Create model instance based on model type
             try:
-                # Create model instance
-                model = Qwen3ForCausalLM(hf_config)
+                model_type = hf_config.model_type
+                
+                if model_type == "qwen3":
+                    model = Qwen3ForCausalLM(hf_config)
+                elif model_type == "gpt2":
+                    model = GPT2ForCausalLM(hf_config)
+                else:
+                    raise ModelLoadError(f"Unsupported model type: {model_type}")
                 
                 # Set cascade attention flag on model layers if enabled
                 if getattr(config, 'enable_cascade_attention', False):
@@ -53,6 +60,11 @@ class ModelLoader:
                 raise ModelLoadError(f"Model file not found: {config.model}") from e
             except Exception as e:
                 raise ModelLoadError(f"Failed to load model weights: {str(e)}") from e
+            
+            # Move model to CUDA and convert to appropriate dtype
+            dtype = hf_config.torch_dtype if hasattr(hf_config, 'torch_dtype') else torch.float16
+            model = model.to(device="cuda", dtype=dtype)
+            model.eval()
             
             return model
     
@@ -125,15 +137,50 @@ class ModelLoader:
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
         
         # Calculate bytes per block (single GPU, no division)
-        num_kv_heads = hf_config.num_key_value_heads
+        # Handle different config formats
+        if hasattr(hf_config, 'num_key_value_heads'):
+            num_kv_heads = hf_config.num_key_value_heads
+        elif hasattr(hf_config, 'num_attention_heads'):
+            num_kv_heads = hf_config.num_attention_heads  # No GQA
+        else:
+            num_kv_heads = hf_config.n_head  # GPT-2 style
+            
+        if hasattr(hf_config, 'num_hidden_layers'):
+            num_layers = hf_config.num_hidden_layers
+        else:
+            num_layers = hf_config.n_layer  # GPT-2 style
+            
+        if hasattr(hf_config, 'head_dim'):
+            head_dim = hf_config.head_dim
+        elif hasattr(hf_config, 'hidden_size'):
+            head_dim = hf_config.hidden_size // hf_config.num_attention_heads
+        else:
+            head_dim = hf_config.n_embd // hf_config.n_head  # GPT-2 style
+            
+        if hasattr(hf_config, 'torch_dtype'):
+            dtype = hf_config.torch_dtype
+        else:
+            dtype = torch.float16  # Default
+            
         # For FlashInfer: [num_layers, num_pages, 2, page_size, num_kv_heads, head_dim]
-        block_bytes = (hf_config.num_hidden_layers * 2 * block_size * 
-                      num_kv_heads * hf_config.head_dim * 
-                      hf_config.torch_dtype.itemsize)
+        block_bytes = (num_layers * 2 * block_size * 
+                      num_kv_heads * head_dim * 
+                      dtype.itemsize)
         
         # Calculate available blocks
         available_memory = total * config.gpu_memory_utilization - used - peak + current
         num_blocks = int(available_memory // block_bytes)
+        
+        # Cap KV cache size based on model size
+        # For small models (< 1B params), limit KV cache to reasonable size
+        model_params = hf_config.hidden_size * hf_config.num_hidden_layers * 4  # Rough estimate
+        if model_params < 1e9:  # Less than 1B parameters
+            # Cap at 2GB for small models
+            max_kv_cache_gb = 2.0
+            max_blocks = int((max_kv_cache_gb * 1024**3) // block_bytes)
+            if num_blocks > max_blocks:
+                print(f"Capping KV cache for small model: {num_blocks} -> {max_blocks} blocks")
+                num_blocks = max_blocks
         
         # Ensure we have at least some blocks
         if num_blocks <= 0:

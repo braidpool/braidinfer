@@ -28,6 +28,13 @@ class LLMEngine:
         if hasattr(config, 'tensor_parallel_size') and config.tensor_parallel_size != 1:
             print(f"Warning: tensor_parallel_size={config.tensor_parallel_size} ignored for single-GPU mode")
         
+        # Estimate KV cache blocks if not specified
+        if config.num_kvcache_blocks == -1:
+            from nanovllm.engine.model_loader import ModelLoader
+            config.num_kvcache_blocks = ModelLoader.calculate_kvcache_blocks(
+                config, config.hf_config, 1, config.kvcache_block_size
+            )
+        
         # Initialize model runner directly (no multiprocessing)
         self.model_runner = ModelRunner(config)
         
@@ -57,12 +64,35 @@ class LLMEngine:
         
         # Register cleanup
         atexit.register(self.exit)
+    
+    def __del__(self):
+        """Ensure cleanup on deletion."""
+        self.exit()
 
     def exit(self):
         """Clean up resources."""
         if hasattr(self, 'model_runner'):
-            # No distributed cleanup needed
+            # Clean up model runner resources
+            if hasattr(self.model_runner, 'model'):
+                del self.model_runner.model
+            if hasattr(self.model_runner, 'wrapper_manager'):
+                del self.model_runner.wrapper_manager
             del self.model_runner
+        
+        if hasattr(self, 'scheduler'):
+            del self.scheduler
+        
+        if hasattr(self, 'tokenizer'):
+            del self.tokenizer
+        
+        # Force cleanup
+        try:
+            import gc
+            import torch
+            gc.collect()
+            torch.cuda.empty_cache()
+        except:
+            pass
 
     def add_request(self, prompt: str | list[int], sampling_params: SamplingParams):
         """Add a new request to the scheduler."""
