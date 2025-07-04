@@ -66,6 +66,7 @@ class ModelLoader:
             model = model.to(device="cuda", dtype=dtype)
             model.eval()
             
+            
             return model
     
     @staticmethod
@@ -157,7 +158,7 @@ class ModelLoader:
         else:
             head_dim = hf_config.n_embd // hf_config.n_head  # GPT-2 style
             
-        if hasattr(hf_config, 'torch_dtype'):
+        if hasattr(hf_config, 'torch_dtype') and hf_config.torch_dtype is not None:
             dtype = hf_config.torch_dtype
         else:
             dtype = torch.float16  # Default

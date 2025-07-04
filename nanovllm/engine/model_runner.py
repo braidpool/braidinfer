@@ -65,8 +65,8 @@ class ModelRunner:
             head_dim = self.hf_config.n_embd // self.hf_config.n_head  # GPT-2
         
         # Create workspace buffer (shared by both wrappers)
-        # FlashInfer may need more workspace for larger batches/sequences
-        self.workspace_size = 128 * 1024 * 1024  # 128MB
+        # Match vLLM's workspace size for better performance
+        self.workspace_size = 256 * 1024 * 1024  # 256MB
         self.workspace_buffer = torch.empty(self.workspace_size, dtype=torch.uint8, device="cuda")
         
         # Create single prefill and decode wrappers to be shared by all layers
@@ -90,6 +90,7 @@ class ModelRunner:
             self.dtype = self.hf_config.torch_dtype
         else:
             self.dtype = torch.float16
+            
         
         # Warmup model to compile CUDA kernels
         ModelLoader.warmup_model(self.model)
@@ -226,7 +227,6 @@ class ModelRunner:
     @torch.inference_mode()
     def run(self, seqs: list[Sequence], is_prefill: bool, cascade_data=None):
         """Run one step of model inference."""
-        
         # Handle both 2-tuple and 3-tuple returns
         if is_prefill:
             with ErrorContext("prefill preparation", num_seqs=len(seqs)):

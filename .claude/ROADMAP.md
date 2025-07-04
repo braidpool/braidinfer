@@ -8,46 +8,50 @@
 - [x] Fix gibberish output bug (update_sequence_lengths)
 - [x] Create unit tests for critical functionality
 - [x] Add FlashInfer API documentation
+- [x] Identify performance bottleneck (1,572 CPU tensor operations)
 
-## Current Sprint
-- [ ] Fix performance regression (23 tok/s → 200+ tok/s)
-- [ ] Add back model warmup
-- [ ] Sprint review and cleanup
+## Current Sprint: Batch Size 1 Performance
+- [ ] Week 1: Quick wins (torch.compile, static memory, tensor ops)
+- [ ] Week 2: CUDA graphs implementation
+- [ ] Target: 31 → 500+ tok/s for batch size 1
 
-## Next Sprint: Performance Recovery
-- [ ] Deep performance profiling with CUDA events
-- [ ] Identify specific bottlenecks (CPU vs GPU)
-- [ ] Compare with vanilla FlashInfer performance
-- [ ] Optimize critical path
+## Next Sprint: Production Hardening
+- [ ] Implement model warmup functionality
+- [ ] Add comprehensive benchmarking suite
+- [ ] Create performance regression tests
+- [ ] Document deployment best practices
 
 ## Future Sprints
 
-### Sprint: Performance Optimization
-- [ ] Profile and identify performance bottlenecks
-- [ ] Optimize memory allocation patterns
-- [ ] Implement efficient batch processing
-- [ ] Add performance benchmarks
+### Sprint: Advanced Optimizations
+- [ ] Custom CUDA kernels for hot paths
+- [ ] TensorRT integration
+- [ ] INT8 quantization support
+- [ ] Kernel fusion opportunities
 
-### Sprint: Testing Infrastructure
-- [ ] Create comprehensive unit test suite
-- [ ] Add integration tests for FlashInfer
-- [ ] Add performance regression tests
-- [ ] Set up CI/CD pipeline
+### Sprint: Multi-Model Support
+- [ ] Test with Llama, Mistral, Gemma families
+- [ ] Model-specific optimizations
+- [ ] Support for MoE models
+- [ ] Quantization format compatibility
 
-### Sprint: Error Handling & Monitoring
-- [ ] Restore error handling that was removed
-- [ ] Add metrics collection back
-- [ ] Implement proper logging
-- [ ] Add health checks
+### Sprint: Developer Experience
+- [ ] Simplified API for single-user scenarios
+- [ ] Auto-tuning for hardware
+- [ ] Profiling and debugging tools
+- [ ] Comprehensive examples
 
-### Sprint: API Enhancement
-- [ ] Improve ChunkedLLM API
-- [ ] Add streaming support
-- [ ] Implement better memory management
-- [ ] Add API documentation
+### Sprint: Memory Optimization
+- [ ] Adaptive KV cache sizing
+- [ ] Memory pooling strategies
+- [ ] Offloading for large models
+- [ ] Dynamic batch optimization
 
-### Sprint: Model Support
-- [ ] Test with various model architectures
-- [ ] Add support for quantized models
-- [ ] Optimize for specific model families
-- [ ] Add model-specific optimizations
+### Sprint: Integration & Ecosystem
+- [ ] LangChain integration
+- [ ] REST API server
+- [ ] Model repository support
+- [ ] Monitoring and metrics
+
+## Long-term Vision
+Create the fastest single-GPU inference engine optimized for individual users and edge deployment, achieving near-theoretical performance limits through aggressive optimization and simplified architecture.

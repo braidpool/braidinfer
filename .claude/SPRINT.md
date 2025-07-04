@@ -1,68 +1,63 @@
-# SPRINT.md - Current Sprint: Performance Recovery
+# SPRINT.md - Current Sprint: Custom CUDA Kernels
 
-## Sprint Goal
-Fix the performance regression from ~200+ tok/s to ~23 tok/s while maintaining the KV layout fix.
+## Previous Sprint Summary
+- Identified root cause: 1,572 CPU tensor operations per forward pass
+- Attempted CUDA graphs and torch.compile - both incompatible with FlashInfer
+- Performance remains at ~30 tok/s (target: 500+ tok/s)
+- ✓ Modified benchmarks to test batch sizes 1, 2, and 4 for single-user optimization
+
+## Current Sprint Goal
+Implement custom CUDA kernels to achieve >500 tokens/s for batch size 1 by eliminating CPU overhead.
 
 ## Sprint Tasks
 
 ### 1. Architectural Review ✓
-- KV layout fix (HND) is correct and must be maintained
-- Wrapper consolidation is architecturally sound
-- Need to identify what's causing the 10x performance drop
+- FlashInfer is fundamentally incompatible with CUDA graphs
+- Custom kernels can fuse operations and eliminate CPU overhead
+- Triton recommended for rapid prototyping
 
-### 2. Performance Investigation ✓ 
-- [x] Profile the current implementation
-- [x] Compare with pre-sprint performance
-- [x] Identify specific bottlenecks
-- [x] Test with/without cascade attention
+### 2. Prototype Fused Attention (Days 1-2)
+- [ ] Set up Triton development environment
+- [ ] Implement batch-1 specialized attention kernel
+- [ ] Benchmark against current implementation
+- [ ] Identify integration points
 
-### 3. Fix Critical Bugs ✓
-- [x] Fixed gibberish output - root cause: update_sequence_lengths not called
-- [x] Fixed floating point exception
-- [x] Added missing logits computation
-- [x] Fixed config attribute compatibility
+### 3. Critical Kernel Implementation (Days 3-5)
+- [ ] Fused RMSNorm + QKV projection
+- [ ] Optimized KV cache operations
+- [ ] Fused attention + output projection
+- [ ] Fused MLP block
 
-### 4. Create Unit Tests ✓
-- [x] Test for sequence length update (test_sequence_length_update.py)
-- [x] Test for inference coherence (test_inference_coherence.py)
-- [x] Test for Qwen3 logit bias (test_qwen3_logit_bias.py)
-- [x] Test for added token initialization (test_added_token_initialization.py)
+### 4. Integration (Days 6-7)
+- [ ] Create kernel wrapper for nano-vllm
+- [ ] Handle memory management
+- [ ] Implement fallback paths
+- [ ] Test with different models
 
-### 5. Documentation ✓
-- [x] Created comprehensive FlashInfer API documentation (.claude/API_FLASHINFER.md)
-- [x] Documented KV cache layouts and wrapper usage
-- [x] Added best practices and examples
+### 5. Optimization & Tuning (Days 8-9)
+- [ ] Profile with Nsight Compute
+- [ ] Tune for specific GPU architecture
+- [ ] Optimize memory access patterns
+- [ ] Minimize register usage
 
-### 6. Cleanup ✓
-- [x] Deleted obsolete example files (example_cascade_inference.py, example_thorough.py)
-- [x] Deleted old benchmark JSON files
-- [x] Deleted minimal_fix.patch
-- [x] Committed essential fix for gibberish output
+### 6. Testing & Documentation (Days 10-11)
+- [ ] Comprehensive correctness tests
+- [ ] Performance benchmarks
+- [ ] Integration tests
+- [ ] Documentation
 
-### 7. Sprint Review ✓
-- [x] All critical bugs fixed
-- [x] All tests pass (9/9 passing)
-- [x] Code committed with comprehensive documentation
-- [ ] Performance regression remains (23 tok/s vs expected 200+ tok/s)
-
-## Sprint Complete
-This sprint successfully:
-- Fixed the gibberish output bug
-- Refactored and fixed all unit tests
-- Added GPT-2 model support
-- Added HuggingFace cache support
-- Created comprehensive documentation
-- Cleaned up the codebase
-
-Next sprint will focus on the performance regression.
-
-## Remaining Work
-- Model warmup functionality still missing
-- Performance regression investigation needed
-- Memory optimization opportunities unexplored
+### 7. Sprint Review (Day 12)
+- [ ] Performance analysis
+- [ ] Code review
+- [ ] Next steps planning
 
 ## Success Criteria
-- ✓ No gibberish output (KV layout fix maintained)
-- ✓ All unit tests pass
-- ✗ Performance returns to ~200+ tok/s (currently 23 tok/s)
-- ✓ Code is ready for commit (essential fix committed)
+- **Minimum**: 200 tok/s (6.5x improvement)
+- **Target**: 500 tok/s (16x improvement)
+- **Stretch**: 800 tok/s (26x improvement)
+
+## Key Decisions
+- Start with Triton for faster development
+- Focus on batch size 1 optimization
+- Fuse as many operations as possible
+- Maintain compatibility with existing API

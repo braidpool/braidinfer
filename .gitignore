@@ -198,3 +198,4 @@ cython_debug/
 .direnv
 .envrc
 Notes.txt
+.old
