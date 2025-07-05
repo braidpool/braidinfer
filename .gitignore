@@ -199,3 +199,12 @@ cython_debug/
 .envrc
 Notes.txt
 .old
+
+# Profiling and benchmark results
+*.prof
+profile_*.json
+diagnose_*.json
+benchmark_results*.json
+chunked_results.json
+bench/results_*.json
+bench/benchmark_summary.json

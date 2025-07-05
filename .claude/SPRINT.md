@@ -1,76 +1,61 @@
-# SPRINT.md - COMPLETED: Integration and Correctness Sprint
+# SPRINT: Breaking Through the Performance Wall - Mastering Fused Kernels
 
-## Sprint Summary
-Successfully completed all objectives! Integrated custom kernels, implemented position-aware KV cache generation, and fixed chunk attention with online softmax algorithm. Achieved stretch goal of >100 tok/s.
+## Sprint Goal
 
-## Completed Tasks ✅
+To correct our fundamental misunderstanding of GPU kernel performance and prove that custom fusion is the correct path to achieving high-performance inference. This sprint is dedicated to fixing the slow `fused_rmsnorm_qkv` kernel and making it **faster** than the unfused PyTorch baseline.
 
-### Week 1: Integration and Position-Awareness
+---
 
-#### 1. Integrate Fused RMSNorm+QKV Kernel (Day 1) ✅
-- [x] Created `Qwen3AttentionFused` class in `nanovllm/models/qwen3.py`
-- [x] Integrated `FusedRMSNormQKV.forward` with proper weight handling
-- [x] Added `use_custom_kernels` flag to enable/disable optimizations
-- [x] Tests pass with <0.001 difference vs standard implementation
-- [x] **Result:** 2.64x speedup confirmed, +143 tok/s improvement
+## Root Cause Analysis & The Path Forward
 
-#### 2. Implement Position-Aware KV Cache Generation (Days 2-4) ✅
-- [x] Added `_prefill_chunk` method to `ChunkedLLM` class
-- [x] Handles position offset for correct RoPE embeddings
-- [x] Implements cascade level assignment:
-    - Level 0: System prompts (most shared)
-    - Level 1: Context chunks (somewhat shared)
-    - Level 2: Query chunks (least shared)
-- [x] **Result:** Position-aware chunking ready for integration
+Our previous sprints have hit a wall. We concluded that custom kernels are slower than PyTorch/cuBLAS. This conclusion is incorrect. We are not hitting a limitation of the technology, but a gap in our implementation skills. Our kernels are slow because they are implemented with naive, CPU-style logic.
 
-#### 3. Refactor the Attention Layer (Day 5) ✅
-- [x] Modified `Qwen3DecoderLayer` to support `use_custom_kernels` flag
-- [x] Created separate paths for standard vs custom kernels
-- [x] Clean integration with minimal code changes
-- [x] **Result:** Seamless switching between implementations
+**The ONLY task for this sprint is to fix this.** We will not pivot to other tasks. We will learn to write a performant kernel correctly.
 
-### Week 2: Correcting and Benchmarking Chunk Attention
+**The Core Principles We Will Implement:**
+1.  **Tiling:** We will process matrices in small blocks (tiles) that fit into the GPU's fastest memory.
+2.  **Shared Memory:** We will use shared memory to stage these tiles, minimizing slow round-trips to global VRAM.
+3.  **Tensor Cores (`tl.dot`):** We will use the `tl.dot` instruction to explicitly command the GPU to use its dedicated, ultra-fast matrix multiplication hardware.
 
-#### 4. Fix the `chunk_decode_attention_kernel` (Days 6-8) ✅
-- [x] Created new `chunk_attention_online.py` with correct algorithm
-- [x] Implements online softmax with m_i and l_i statistics
-- [x] No per-chunk normalization - accumulates across all chunks
-- [x] Handles Triton constraints (no continue statements)
-- [x] **Result:** Mathematically correct attention, 2,938 tok/s capability
+---
 
-#### 5. End-to-End Testing and Benchmarking (Days 9-10) ✅
-- [x] Created `tests/test_fused_kernel_simple.py` - unit tests
-- [x] Created `tests/test_kernel_performance.py` - benchmarks
-- [x] Created `tests/test_chunked_generation.py` - integration framework
-- [x] Verified <0.001 max difference vs reference implementation
-- [x] **Result:** All tests pass, performance validated
+## Sprint Tasks
 
-#### 6. Sprint Review & Cleanup (Day 11-12) ✅
-- [x] Created comprehensive sprint summary document
-- [x] Code is clean with proper documentation
-- [x] Identified next bottlenecks for future optimization
-- [x] **Result:** Sprint completed successfully
+### 1. Mandatory Reading & Education (1 Day)
 
-## Performance Results
+-   **Objective:** Understand the theory before writing code.
+-   **Action Items:**
+    1.  Read the Triton documentation on matrix multiplication from start to finish: [https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html](https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html)
+    2.  Read the Triton documentation on fused attention, paying close attention to how it handles tiling and `tl.dot`: [https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html](https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html)
 
-### Individual Kernels
-- **Fused RMSNorm+QKV**: 0.054 ms/call (2.64x speedup)
-- **Chunk Attention**: 0.340 ms/call (2,938 tok/s theoretical)
+### 2. Re-implement the `fused_rmsnorm_qkv` Kernel CORRECTLY (3 Days)
 
-### Combined Performance
-- **Baseline**: 87 tok/s
-- **With optimizations**: ~230 tok/s
-- **Improvement**: 2.64x overall speedup
-- **Stretch goal**: >100 tok/s ✅ ACHIEVED
+-   **Objective:** Rewrite the existing slow kernel using the patterns from the Triton documentation.
+-   **Location:** `nanovllm/kernels/fused_rmsnorm_qkv.py`
+-   **Action Items:**
+    1.  **Delete the existing, slow kernel code.** Start fresh to avoid patching a broken design.
+    2.  Implement a new `fused_rmsnorm_qkv_kernel`.
+    3.  **RMSNorm Pass:** The first part of the kernel should compute the RMS Norm. This can be done efficiently using warp-level primitives to reduce the sum of squares.
+    4.  **Tiled GEMM for Q, K, V:**
+        -   The main body of the kernel will be a loop over the input sequence dimension.
+        -   Inside the loop, load **tiles** of the normalized input and the Q, K, and V weight matrices into **shared memory**.
+        -   Use `tl.dot` to multiply the normalized input tile with the weight tiles to produce tiles of the Q, K, and V output.
+        -   Store the resulting output tiles back to global memory.
+    5.  Ensure the kernel is numerically identical to the PyTorch version.
 
-## Success Criteria Results
-- **Minimum** ✅: Fused kernel integrated, measurably faster, position-aware caching working
-- **Target** ✅: Chunk attention correct and integrated, end-to-end pipeline functional
-- **Stretch** ✅: Achieved >100 tok/s (actually ~230 tok/s)
+### 3. Benchmark and Prove the Speedup (1 Day)
 
-## Next Sprint: Further Optimizations
-Based on analysis, next targets for optimization:
-1. MLP block fusion (Gate + Up + Down projections)
-2. Attention output fusion (Output projection + residual)
-3. Memory layout optimization
-4. Target: 230 → 400+ tok/s
+-   **Objective:** Validate that the correct implementation is faster and document the success.
+-   **Action Items:**
+    1.  Run the `benchmark_fusion.py` test.
+    2.  The new, correct kernel **must be faster** than the PyTorch baseline. There is no ambiguity here. If it is not, the implementation is still incorrect.
+    3.  Create a new document `.claude/SPRINT_FUSION_SUCCESS.md`.
+    4.  In this document, post the new performance numbers and write a paragraph explaining how tiling, shared memory, and `tl.dot` were the keys to unlocking the performance that was previously thought to be impossible.
+
+---
+
+## Success Criteria
+
+-   **Non-Negotiable:** The new `fused_rmsnorm_qkv_kernel` is measurably and significantly **FASTER** than the baseline PyTorch implementation for a batch size of 1. A slowdown is not an option and indicates a failed sprint.
+-   **Target:** Achieve a >1.5x speedup on the RMSNorm+QKV operation, resulting in a noticeable improvement in end-to-end tok/s.
+-   **Stretch:** The intern can confidently explain the role of each optimization (tiling, shared memory, `tl.dot`) and is ready to apply this pattern to other fusions like the MLP block.

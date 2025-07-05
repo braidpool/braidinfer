@@ -22,6 +22,9 @@ class Config:
     max_cascade_levels: int = 3
     chunk_registry_size: int = 1000
     chunk_persistence_dir: str | None = None
+    
+    # Custom kernel configuration
+    use_custom_kernels: bool = False
 
     def __post_init__(self):
         # Check if it's a local directory first

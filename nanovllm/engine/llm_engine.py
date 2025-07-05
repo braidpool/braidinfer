@@ -19,9 +19,17 @@ class LLMEngine:
     """LLM Engine for single-GPU inference."""
     
     def __init__(self, model, **kwargs):
+        # Handle model_kwargs separately
+        model_kwargs = kwargs.pop('model_kwargs', {})
+        
         # Extract config parameters
         config_fields = {field.name for field in fields(Config)}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
+        
+        # Add model-specific kwargs to config
+        if 'use_custom_kernels' in model_kwargs:
+            config_kwargs['use_custom_kernels'] = model_kwargs['use_custom_kernels']
+        
         config = Config(model, **config_kwargs)
         
         # For single GPU, tensor_parallel_size should be 1
@@ -133,7 +141,7 @@ class LLMEngine:
         return finished_seqs
 
     def generate(self, prompts: str | list[int] | list[str] | list[list[int]], 
-                 sampling_params: SamplingParams) -> list[dict]:
+                 sampling_params: SamplingParams, stream: bool = False) -> list[dict] | list:
         """Generate completions for prompts."""
         # Normalize inputs
         if isinstance(prompts, str):
@@ -148,38 +156,97 @@ class LLMEngine:
         for prompt in prompts:
             self.add_request(prompt, sampling_params)
         
-        # Process until all complete
-        results = []
-        pbar = tqdm(total=len(prompts), desc="Generating", disable=len(prompts) == 1,
-                    bar_format='{l_bar}{bar}| {n}/{total} [{elapsed}<{remaining}, {rate_fmt}{postfix}]')
-        
-        while len(results) < len(prompts):
-            finished = self.step()
-            results.extend(finished)
-            pbar.update(len(finished))
+        if stream:
+            # Streaming mode - yield results as they're generated
+            return self._generate_stream(len(prompts))
+        else:
+            # Non-streaming mode - collect all results
+            results = []
+            pbar = tqdm(total=len(prompts), desc="Generating", disable=len(prompts) == 1,
+                        bar_format='{l_bar}{bar}| {n}/{total} [{elapsed}<{remaining}, {rate_fmt}{postfix}]')
             
-            # Update progress bar stats
-            if self._timing_stats:
-                avg_time = sum(self._timing_stats) / len(self._timing_stats)
-                if self.scheduler.running:
-                    # For now, use a simple heuristic: sequences with only prompt tokens are in prefill
-                    is_prefill = any(seq.num_completion_tokens == 0 for seq in self.scheduler.running)
-                    phase = "Prefill" if is_prefill else "Decode"
-                    tokens_per_sec = len(self.scheduler.running) / avg_time if avg_time > 0 else 0
-                    pbar.set_postfix_str(f"{phase}={tokens_per_sec:.0f}tok/s")
+            while len(results) < len(prompts):
+                finished = self.step()
+                results.extend(finished)
+                pbar.update(len(finished))
+                
+                # Update progress bar stats
+                if self._timing_stats:
+                    avg_time = sum(self._timing_stats) / len(self._timing_stats)
+                    if self.scheduler.running:
+                        # For now, use a simple heuristic: sequences with only prompt tokens are in prefill
+                        is_prefill = any(seq.num_completion_tokens == 0 for seq in self.scheduler.running)
+                        phase = "Prefill" if is_prefill else "Decode"
+                        tokens_per_sec = len(self.scheduler.running) / avg_time if avg_time > 0 else 0
+                        pbar.set_postfix_str(f"{phase}={tokens_per_sec:.0f}tok/s")
+            
+            pbar.close()
+            
+            # Format results
+            outputs = []
+            for seq in results:
+                output = {
+                    "text": self.tokenizer.decode(seq.completion_token_ids),
+                    "token_ids": seq.completion_token_ids
+                }
+                outputs.append(output)
+            
+            return outputs
+    
+    def _generate_stream(self, num_prompts: int):
+        """Generate completions with streaming."""
+        completed_seqs = []
+        seq_outputs = {}  # Track per-sequence outputs
         
-        pbar.close()
-        
-        # Format results
-        outputs = []
-        for seq in results:
-            output = {
-                "text": self.tokenizer.decode(seq.completion_token_ids),
-                "token_ids": seq.completion_token_ids
-            }
-            outputs.append(output)
-        
-        return outputs
+        while len(completed_seqs) < num_prompts:
+            # Get running sequences before step
+            running_seqs = list(self.scheduler.running) if self.scheduler.running else []
+            
+            # Take a step
+            finished = self.step()
+            
+            # Check for new tokens in running sequences
+            for seq in running_seqs:
+                if seq.status == SequenceStatus.RUNNING and seq.completion_token_ids:
+                    # Get new tokens since last yield
+                    seq_id = id(seq)
+                    prev_len = seq_outputs.get(seq_id, 0)
+                    current_tokens = seq.completion_token_ids
+                    
+                    if len(current_tokens) > prev_len:
+                        # New tokens generated
+                        new_tokens = current_tokens[prev_len:]
+                        new_text = self.tokenizer.decode(new_tokens)
+                        
+                        yield {
+                            "text": new_text,
+                            "token_ids": new_tokens,
+                            "cumulative_text": self.tokenizer.decode(current_tokens),
+                            "finished": False
+                        }
+                        
+                        seq_outputs[seq_id] = len(current_tokens)
+            
+            # Handle finished sequences
+            for seq in finished:
+                completed_seqs.append(seq)
+                seq_id = id(seq)
+                
+                # Yield final result
+                yield {
+                    "text": "",  # No new text, just marking as finished
+                    "token_ids": [],
+                    "cumulative_text": self.tokenizer.decode(seq.completion_token_ids),
+                    "finished": True,
+                    "final_output": {
+                        "text": self.tokenizer.decode(seq.completion_token_ids),
+                        "token_ids": seq.completion_token_ids
+                    }
+                }
+                
+                # Clean up tracking
+                if seq_id in seq_outputs:
+                    del seq_outputs[seq_id]
     
     def get_metrics(self) -> dict:
         """Get performance metrics."""

@@ -17,7 +17,7 @@ from nanovllm.kernels.fused_rmsnorm_qkv_production import FusedRMSNormQKV
 from nanovllm.kernels.chunk_attention import ChunkAttention
 
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from nanovllm.engine.inference_context import InferenceContext
@@ -129,12 +129,14 @@ class Qwen3AttentionFused(nn.Module):
         rope_scaling: dict = None,
         max_position: int = 8192,
         use_custom_chunk_kernel: bool = False,
+        use_fused_output: bool = False,  # Disabled due to shape issues
     ):
         super().__init__()
         self.layer_idx = layer_idx
         self.hidden_size = hidden_size
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
+        self.use_fused_output = use_fused_output
         
         # Determine head dimensions
         if head_dim is None:
@@ -204,6 +206,7 @@ class Qwen3AttentionFused(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         context: 'InferenceContext' = None,
+        residual: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Forward pass with fused RMSNorm+QKV kernel.
@@ -234,13 +237,21 @@ class Qwen3AttentionFused(nn.Module):
             k_bias = qkv_bias[self.q_size:self.q_size + self.kv_size]
             v_bias = qkv_bias[self.q_size + self.kv_size:]
             
-            q = q + q_bias.view(1, -1).expand(q.shape[0], -1)
-            k = k + k_bias.view(1, -1).expand(k.shape[0], -1)
-            v = v + v_bias.view(1, -1).expand(v.shape[0], -1)
+            # Reshape bias to match [batch, num_heads, head_dim]
+            q_bias = q_bias.view(self.num_heads, self.head_dim)
+            k_bias = k_bias.view(self.num_kv_heads, self.head_dim)
+            v_bias = v_bias.view(self.num_kv_heads, self.head_dim)
+            
+            # Add bias
+            q = q + q_bias.unsqueeze(0)
+            k = k + k_bias.unsqueeze(0)
+            v = v + v_bias.unsqueeze(0)
         
-        # Convert back to half precision if needed
-        if hidden_states.dtype == torch.float16:
-            q, k, v = q.half(), k.half(), v.half()
+        # Convert back to original dtype if needed
+        if hidden_states.dtype != torch.float32:
+            q = q.to(hidden_states.dtype)
+            k = k.to(hidden_states.dtype)
+            v = v.to(hidden_states.dtype)
             
         # q, k, v are already shaped as [batch_seq_len, num_heads, head_dim]
         # Apply Q/K normalization
@@ -267,7 +278,38 @@ class Qwen3AttentionFused(nn.Module):
             attn_output = self.attn(q, k, v, context)
             
         # Output projection
-        output = self.o_proj(attn_output)
+        if self.use_fused_output and residual is not None:
+            # Use fused output projection + residual
+            from nanovllm.kernels.fused_attention_output import FusedAttentionOutput
+            
+            # Reshape attn_output if needed
+            attn_shape = attn_output.shape
+            if attn_output.dim() == 2:
+                attn_output = attn_output.unsqueeze(0).unsqueeze(0)  # Add batch and seq dims
+            elif attn_output.dim() == 3:
+                attn_output = attn_output.unsqueeze(0)  # Add batch dim
+                
+            # Ensure residual has same shape
+            if residual.dim() == 2:
+                residual = residual.unsqueeze(0).unsqueeze(0)
+            elif residual.dim() == 3:
+                residual = residual.unsqueeze(0)
+                
+            output = FusedAttentionOutput.forward(
+                attn_output,
+                self.o_proj.weight,
+                residual
+            )
+            
+            # Reshape back to original dimensions
+            if len(attn_shape) == 2:
+                output = output.squeeze(0).squeeze(0)
+            elif len(attn_shape) == 3:
+                output = output.squeeze(0)
+        else:
+            # Standard output projection
+            output = self.o_proj(attn_output)
+            
         return output
 
 
@@ -345,13 +387,19 @@ class Qwen3DecoderLayer(nn.Module):
         
         if self.use_custom_kernels:
             # Fused kernel expects unnormalized input
-            hidden_states = self.self_attn(positions, hidden_states, context)
+            # Check if we should use fused output projection
+            if hasattr(self.self_attn, 'use_fused_output'):
+                # Pass residual for fused output projection + add
+                hidden_states = self.self_attn(positions, hidden_states, context, residual)
+            else:
+                hidden_states = self.self_attn(positions, hidden_states, context)
+                hidden_states = residual + hidden_states
         else:
             # Standard path with separate normalization
             hidden_states = self.input_layernorm(hidden_states)
             hidden_states = self.self_attn(positions, hidden_states, context)
+            hidden_states = residual + hidden_states
             
-        hidden_states = residual + hidden_states
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)

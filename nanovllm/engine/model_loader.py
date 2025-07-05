@@ -39,7 +39,9 @@ class ModelLoader:
                 model_type = hf_config.model_type
                 
                 if model_type == "qwen3":
-                    model = Qwen3ForCausalLM(hf_config)
+                    # Check if use_custom_kernels is specified in config
+                    use_custom_kernels = getattr(config, 'use_custom_kernels', False)
+                    model = Qwen3ForCausalLM(hf_config, use_custom_kernels=use_custom_kernels)
                 elif model_type == "gpt2":
                     model = GPT2ForCausalLM(hf_config)
                 else:
