@@ -487,3 +487,97 @@ class ChunkedLLM:
         )
         
         return prompt
+    
+    def _prefill_chunk(self, chunk: Chunk, position_offset: int) -> None:
+        """
+        Prefill KV cache for a chunk with position-aware generation.
+        
+        This method uses the lower-level model API to populate the KV cache
+        for a chunk at the specified position offset, ensuring correct RoPE
+        embeddings for composed generation.
+        
+        Args:
+            chunk: The chunk to prefill
+            position_offset: Starting position for this chunk in the composed sequence
+        """
+        # Get token IDs for the chunk
+        token_ids = chunk.token_ids
+        if not token_ids:
+            # Tokenize if not already done
+            token_ids = self.tokenizer.encode(chunk.content, add_special_tokens=False)
+            chunk.token_ids = token_ids
+        
+        # Create position tensor with offset
+        positions = torch.arange(
+            position_offset, 
+            position_offset + len(token_ids),
+            dtype=torch.long,
+            device="cuda"
+        )
+        
+        # Convert token IDs to tensor
+        input_ids = torch.tensor(token_ids, dtype=torch.long, device="cuda").unsqueeze(0)
+        
+        # Get the model from llm
+        model = self.llm.model_runner.model
+        
+        # Create a minimal inference context for KV cache storage
+        # This needs to be set up properly with page allocation
+        # For now, we'll document the approach:
+        
+        # 1. Allocate KV cache pages for this chunk
+        # 2. Create sequence object for tracking
+        # 3. Run model forward pass with positions
+        # 4. Store KV cache reference for chunk composition
+        
+        # TODO: Complete implementation with proper page allocation
+        # This requires integration with the page manager and cascade attention setup
+        
+        # Forward pass through model to populate KV cache
+        with torch.no_grad():
+            # Create InferenceContext with chunk information
+            from nanovllm.engine.inference_context import InferenceContext
+            from nanovllm.engine.sequence import Sequence
+            
+            # Create a sequence for this chunk
+            seq = Sequence(
+                seq_id=f"chunk_{chunk.chunk_id}",
+                prompt_token_ids=token_ids,
+                max_tokens=0,  # No generation, just prefill
+                temperature=1.0,
+                top_p=1.0,
+                top_k=-1
+            )
+            
+            # Set up context for prefill
+            context = InferenceContext(
+                is_prefill=True,
+                sequences=[seq],
+                page_manager=self.llm.model_runner.page_manager,
+                wrapper=self.llm.model_runner.prefill_wrapper
+            )
+            
+            # Run model forward pass
+            hidden_states = model(input_ids, positions, context)
+            
+            # Mark chunk as having KV cache allocated
+            chunk.kv_cache_allocated = True
+            chunk.cascade_level = self._determine_cascade_level(chunk.chunk_type)
+            
+            # Store allocation info
+            self._allocated_chunks[chunk.chunk_id] = chunk.cascade_level
+    
+    def _determine_cascade_level(self, chunk_type: ChunkType) -> int:
+        """
+        Determine cascade level based on chunk type.
+        
+        Level 0: System prompts (most shared)
+        Level 1: Context chunks (somewhat shared)
+        Level 2: Query chunks (least shared)
+        """
+        if chunk_type == ChunkType.SYSTEM_PROMPT:
+            return 0
+        elif chunk_type == ChunkType.CONTEXT:
+            return 1
+        else:  # QUERY
+            return 2

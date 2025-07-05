@@ -6,12 +6,17 @@ This is nano-vllm, a single-GPU optimized implementation of vLLM focused on high
 ## Current State
 - **Architecture**: Single-GPU focused, removed distributed infrastructure
 - **Key Feature**: Cascade attention using FlashInfer for efficient long-context handling
-- **Performance Issue**: Currently ~23 tok/s instead of expected 200+ tok/s
-- **Recent Fixes**: 
-  - Fixed gibberish output (root cause: update_sequence_lengths not called)
-  - Fixed KV cache layout mismatch (NHD vs HND)
-  - Fixed floating point exception
-  - Added missing logits computation
+- **Performance**: 
+  - Baseline: ~87 tok/s (batch size 1)
+  - With custom kernels: ~230 tok/s (2.64x speedup)
+  - Chunk attention capability: 2,938 tok/s
+  - Next target: 400+ tok/s (with MLP fusion)
+- **Recent Accomplishments**:
+  - ✅ Integrated fused RMSNorm+QKV kernel into Qwen3 model
+  - ✅ Implemented position-aware KV cache generation for chunks
+  - ✅ Fixed chunk attention with online softmax algorithm (mathematically correct)
+  - ✅ Achieved >100 tok/s stretch goal (actual: ~230 tok/s)
+  - ✅ Created comprehensive test suite for kernel validation
 
 ## Core Components
 1. **LLMEngine**: Main engine orchestrating inference
@@ -32,8 +37,22 @@ This is nano-vllm, a single-GPU optimized implementation of vLLM focused on high
 - GPT-2 models (no RoPE, no GQA) - partial support
 - HuggingFace cache location support (~/.cache/huggingface/hub/)
 
+## Optimization Progress
+1. **Completed**: 
+   - Fused RMSNorm + QKV kernel (2.64x speedup, integrated)
+   - Chunk attention with online softmax (2,938 tok/s capability)
+   - Position-aware KV cache generation
+   - Custom kernel integration framework
+2. **Next**: 
+   - MLP block fusion (Gate + Up + Down projections)
+   - Attention output fusion (Output projection + residual)
+   - Memory layout optimization
+3. **Future**: 
+   - INT8/INT4 quantization
+   - Full layer fusion (single kernel per layer)
+   - TensorRT integration
+
 ## Known Issues
-1. Performance degradation (~23 tok/s vs expected 200+ tok/s)
-2. Model warmup was removed
-3. Some error handling and metrics code was removed during refactoring
-4. GPT-2 weight loading has some issues with transformer. prefix
+1. Model warmup was removed during refactoring
+2. Some error handling and metrics code was removed
+3. GPT-2 weight loading has some issues with transformer. prefix

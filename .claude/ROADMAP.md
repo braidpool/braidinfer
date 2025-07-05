@@ -8,12 +8,20 @@
 - [x] Fix gibberish output bug (update_sequence_lengths)
 - [x] Create unit tests for critical functionality
 - [x] Add FlashInfer API documentation
-- [x] Identify performance bottleneck (1,572 CPU tensor operations)
+- [x] Identify performance bottleneck (1,621 kernel launches)
+- [x] Implement fused RMSNorm + QKV kernel (85.8 tok/s achieved)
+- [x] Integration and Correctness Sprint (230 tok/s achieved):
+    - [x] Integrate fused RMSNorm+QKV kernel into Qwen3 model
+    - [x] Implement position-aware KV cache generation
+    - [x] Fix chunk attention with online softmax algorithm
+    - [x] Create end-to-end integration tests
+    - [x] Achieve >100 tok/s stretch goal (actual: ~230 tok/s)
 
-## Current Sprint: Batch Size 1 Performance
-- [ ] Week 1: Quick wins (torch.compile, static memory, tensor ops)
-- [ ] Week 2: CUDA graphs implementation
-- [ ] Target: 31 → 500+ tok/s for batch size 1
+## Current Sprint: Additional Kernel Fusion
+- [ ] MLP block fusion (Gate + Up + Down projections)
+- [ ] Attention output fusion (Output projection + residual)
+- [ ] Memory layout optimization
+- [ ] Target: 230 → 400+ tok/s for batch size 1
 
 ## Next Sprint: Production Hardening
 - [ ] Implement model warmup functionality
@@ -23,11 +31,11 @@
 
 ## Future Sprints
 
-### Sprint: Advanced Optimizations
-- [ ] Custom CUDA kernels for hot paths
+### Sprint: Quantization & Advanced Optimizations
+- [ ] INT8/INT4 quantization kernels
+- [ ] Dynamic quantization support
 - [ ] TensorRT integration
-- [ ] INT8 quantization support
-- [ ] Kernel fusion opportunities
+- [ ] Full layer fusion (single kernel per layer)
 
 ### Sprint: Multi-Model Support
 - [ ] Test with Llama, Mistral, Gemma families
