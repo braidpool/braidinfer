@@ -11,6 +11,7 @@ It helps identify exactly where numerical divergence occurs.
 
 import unittest
 import torch
+import torch.nn as nn
 import numpy as np
 from transformers import AutoModelForCausalLM, AutoConfig
 import sys
@@ -162,7 +163,19 @@ class TestLayerByLayerComparison(unittest.TestCase):
             num_kv_heads=num_kv_heads,
             head_dim=head_dim,
             rope_theta=1000000.0,  # Correct value for Qwen3
+            qkv_bias=False,  # Qwen3 config
         ).to(self.device)
+        
+        # Initialize weights (otherwise output will be zero)
+        with torch.no_grad():
+            # Initialize QKV projection weights
+            nn.init.xavier_uniform_(attn.qkv_proj.weight)
+            # Initialize output projection
+            nn.init.xavier_uniform_(attn.o_proj.weight)
+            # Initialize layer norms
+            nn.init.ones_(attn.input_layernorm.weight)
+            nn.init.ones_(attn.q_norm.weight)
+            nn.init.ones_(attn.k_norm.weight)
         
         # Create test input
         hidden_states = torch.randn(seq_len, hidden_size, device=self.device, dtype=torch.float16)

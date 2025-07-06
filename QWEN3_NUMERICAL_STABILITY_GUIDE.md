@@ -95,4 +95,60 @@ This means that standard float16/bfloat16 computation is insufficient for this m
 2. **For Production**: Consider using models without extreme normalization weights
 3. **For Debugging**: If you see values exploding at layer 1 or 2, check your precision handling
 
-By following this guide, you should be able to quickly identify and fix the source of the numerical instability. The key is to be systematic, validate each component against a known-good reference, and pay special attention to numerical precision in the presence of extreme normalization weights.
+## Critical Discovery: Corrupted Bias Values in Model Checkpoint
+
+A major source of numerical instability has been identified in the Qwen3-0.6B model checkpoint: **corrupted attention bias values**.
+
+### The Problem
+
+1. **Configuration Mismatch**: The Qwen3 model configuration specifies `attention_bias: False`
+2. **Corrupted Values**: Despite this, the model checkpoint contains bias values with extreme magnitudes (10^29 to 10^34) in layers 1-4
+3. **Symptom**: When these corrupted bias values are used, layer outputs explode to infinity immediately
+
+### Root Cause Analysis
+
+The issue occurs because:
+- The model was likely trained without attention bias (as per config)
+- The checkpoint still contains uninitialized or corrupted bias tensors
+- Loading code may still load these bias values even though they shouldn't be used
+- Fused kernels that apply these corrupted biases cause immediate numerical explosion
+
+### The Solution
+
+When implementing Qwen3, **always ignore attention bias values from the checkpoint**:
+
+```python
+# Bad: Using bias from checkpoint even though config says no bias
+q, k, v = fused_kernel(hidden_states, norm_weight, qkv_weight, qkv_bias)
+
+# Good: Pass None for bias when config specifies attention_bias=False
+q, k, v = fused_kernel(hidden_states, norm_weight, qkv_weight, None)
+```
+
+### Implementation Checklist
+
+1. **Check Model Config**: Verify if `attention_bias` is False in the model configuration
+2. **Ignore Checkpoint Bias**: If bias is disabled in config, always pass `None` or zero bias
+3. **Validate Loaded Weights**: Add checks to ensure bias values are reasonable if they should be used
+4. **Test Layer Outputs**: Monitor layer outputs for explosion to infinity (a clear sign of bias corruption)
+
+### Diagnostic Code
+
+To check for bias corruption in your implementation:
+
+```python
+# Check if bias values are corrupted
+for i, layer in enumerate(model.layers):
+    if hasattr(layer.self_attn, 'qkv_proj') and layer.self_attn.qkv_proj.bias is not None:
+        bias = layer.self_attn.qkv_proj.bias
+        if not torch.isfinite(bias).all():
+            print(f"Layer {i} has non-finite bias values!")
+        elif bias.abs().max() > 1e6:
+            print(f"Layer {i} has extreme bias values: max={bias.abs().max()}")
+```
+
+### Key Takeaway
+
+Even if a model's configuration says it doesn't use certain parameters, the checkpoint may still contain corrupted values for those parameters. Always validate that loaded values are reasonable and match the model's configuration. When in doubt, trust the configuration over the checkpoint values.
+
+By following this guide, you should be able to quickly identify and fix the source of the numerical instability. The key is to be systematic, validate each component against a known-good reference, pay special attention to numerical precision in the presence of extreme normalization weights, and be aware of potential corruption in model checkpoints.

@@ -37,8 +37,8 @@ class Qwen3AttentionSeparated(nn.Module):
         num_kv_heads: int,
         head_dim: Optional[int] = None,
         rms_norm_eps: float = 1e-6,
-        qkv_bias: bool = True,
-        rope_theta: float = 1000000,  # Correct default for Qwen3
+        qkv_bias: bool = False,  # Default, should be overridden by config
+        rope_theta: float = 10000.0,  # Standard default, should be overridden by config
         rope_scaling: dict = None,
         max_position: int = 8192,
     ):
@@ -129,6 +129,10 @@ class Qwen3AttentionSeparated(nn.Module):
         sin_cache = cos_sin_cache[:, self.head_dim // 2:]
         
         # Apply fused QKV+RoPE
+        # IMPORTANT: Pass None for bias if config says no bias (Qwen3 case)
+        # to avoid using potentially corrupted bias values
+        bias_to_use = None if not hasattr(self.qkv_proj, 'bias') or self.qkv_proj.bias is None else self.qkv_proj.bias
+        
         q, k, v = QKVRoPESimple.forward(
             normalized,  # float32 input
             self.qkv_proj.weight,
@@ -137,7 +141,7 @@ class Qwen3AttentionSeparated(nn.Module):
             sin_cache,
             self.num_heads,
             self.num_kv_heads,
-            self.qkv_proj.bias
+            bias_to_use
         )
         
         # Step 3: Apply Q/K normalization

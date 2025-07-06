@@ -37,7 +37,7 @@ class Qwen3Attention(nn.Module):
         head_dim: int | None = None,
         rms_norm_eps: float = 1e-06,
         qkv_bias: bool = False,
-        rope_theta: float = 10000,
+        rope_theta: float = 10000.0,  # Standard default, should be overridden by config
         rope_scaling: tuple | None = None,
     ) -> None:
         super().__init__()
@@ -125,8 +125,8 @@ class Qwen3AttentionFused(nn.Module):
         num_kv_heads: int,
         head_dim: int = None,
         rms_norm_eps: float = 1e-6,
-        qkv_bias: bool = True,
-        rope_theta: float = 10000,
+        qkv_bias: bool = False,
+        rope_theta: float = 10000.0,  # Standard default, should be overridden by config
         rope_scaling: dict = None,
         max_position: int = 8192,
         use_custom_chunk_kernel: bool = False,
@@ -138,6 +138,7 @@ class Qwen3AttentionFused(nn.Module):
         self.num_heads = num_heads
         self.num_kv_heads = num_kv_heads
         self.use_fused_output = use_fused_output
+        self.qkv_bias = qkv_bias
         
         # Determine head dimensions
         if head_dim is None:
@@ -219,6 +220,9 @@ class Qwen3AttentionFused(nn.Module):
         
         Note: This expects unnormalized hidden_states as input.
         """
+        # CRITICAL: Save the input dtype - this is what we must output
+        input_dtype = hidden_states.dtype
+        
         # Use fused kernel for RMSNorm + QKV projection
         # Ensure input is 2D for kernel
         batch_size = hidden_states.shape[0] if hidden_states.dim() == 3 else 1
@@ -230,74 +234,68 @@ class Qwen3AttentionFused(nn.Module):
         if layernorm_weight is None:
             raise ValueError("layernorm_weight must be provided for fused kernel")
         
-        # Check if this model has extreme K normalization weights
-        # If so, use standard computation for numerical stability
-        if hasattr(self, '_use_standard_computation'):
-            use_standard = self._use_standard_computation
+        # Always use the fused kernel - it handles float32 precision properly
+        # The "standard computation" path has numerical issues
+        if False:  # Disabled - standard path causes overflow
+            # Use standard PyTorch operations for models with extreme weights
+            # Apply RMSNorm manually with float32 precision
+            hidden_float = hidden_states.float()
+            variance = hidden_float.pow(2).mean(dim=-1, keepdim=True)
+            hidden_normed = hidden_states / torch.sqrt(variance + self.rms_norm_eps)
+            hidden_normed = hidden_normed * layernorm_weight
+            
+            # QKV projection - ensure correct dtype
+            proj_input = hidden_normed.to(self.qkv_proj.weight.dtype)
+            
+            qkv = self.qkv_proj(proj_input)
+            
+            # Split into Q, K, V
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q = q.view(-1, self.num_heads, self.head_dim)
+            k = k.view(-1, self.num_kv_heads, self.head_dim)
+            v = v.view(-1, self.num_kv_heads, self.head_dim)
+            
         else:
-            # Check once and cache the result
-            self._use_standard_computation = self.k_norm.weight.max().item() > 20
-            use_standard = self._use_standard_computation
-        
-        if use_standard:
-            # Use minimal float32 kernel for models with extreme weights
-            # This follows llama.cpp's approach: float32 only for accumulators
-            q, k, v = FusedRMSNormQKVMinimalF32.forward(
-                hidden_states,  # Keep in original dtype
-                layernorm_weight,  # Keep in original dtype
-                self.qkv_proj.weight,  # Keep in original dtype
+            # Use the fused kernel WITH BIAS SUPPORT
+            from nanovllm.kernels.fused_rmsnorm_qkv_with_bias import FusedRMSNormQKVWithBias
+            
+            
+            q, k, v = FusedRMSNormQKVWithBias.forward(
+                hidden_states,
+                layernorm_weight,
+                self.qkv_proj.weight,
+                None if not self.qkv_bias else self.qkv_proj.bias,  # Use bias only if config says so
                 self.num_heads,
                 self.num_kv_heads,
                 eps=self.rms_norm_eps
             )
-        else:
-            # Use the fused kernel for normal models
-            # Also use minimal float32 approach for consistency
-            q, k, v = FusedRMSNormQKVMinimalF32.forward(
-                hidden_states,  # Keep in original dtype
-                layernorm_weight,  # Keep in original dtype
-                self.qkv_proj.weight,  # Keep in original dtype
-                self.num_heads,
-                self.num_kv_heads,
-                eps=self.rms_norm_eps
-            )
         
-        # Add bias if present (both fused kernels don't include bias)
-        if self.qkv_proj.bias is not None:
-            qkv_bias = self.qkv_proj.bias
-            q_bias = qkv_bias[:self.q_size]
-            k_bias = qkv_bias[self.q_size:self.q_size + self.kv_size]
-            v_bias = qkv_bias[self.q_size + self.kv_size:]
-            
-            # Reshape bias to match [batch, num_heads, head_dim]
-            q_bias = q_bias.view(self.num_heads, self.head_dim)
-            k_bias = k_bias.view(self.num_kv_heads, self.head_dim)
-            v_bias = v_bias.view(self.num_kv_heads, self.head_dim)
-            
-            # Add bias
-            q = q + q_bias.unsqueeze(0)
-            k = k + k_bias.unsqueeze(0)
-            v = v + v_bias.unsqueeze(0)
+        # Bias is now handled inside the fused kernel
         
-        # Apply Q/K normalization
-        q = self.q_norm(q)
-        k = self.k_norm(k)
+        # Apply Q/K normalization in float32 for stability with extreme weights
+        q_normed = self.q_norm(q.float() if q.dtype != torch.float32 else q)
+        k_normed = self.k_norm(k.float() if k.dtype != torch.float32 else k)
         
-        # Convert to original dtype for FlashInfer compatibility
-        # Note: q, k, v may be in float32 if using minimal float32 kernel
-        target_dtype = hidden_states.dtype if hidden_states.dtype != torch.float32 else torch.bfloat16
-        if q.dtype != target_dtype:
-            q = q.to(target_dtype)
-            k = k.to(target_dtype)
-            v = v.to(target_dtype)
+        # CRITICAL FIX: Convert back to input dtype AFTER all normalization
+        # This prevents dtype mismatch in residual connections
+        q = q_normed.to(input_dtype)
+        k = k_normed.to(input_dtype)
+        v = v.to(input_dtype)
+        
         
         # Reshape q and k back to [batch_seq_len, hidden_dim] for rotary embeddings
         batch_seq_len = q.shape[0]
         q_flat = q.view(batch_seq_len, -1)
         k_flat = k.view(batch_seq_len, -1)
         
+        # Flatten positions to match batch_seq_len dimension
+        if positions.dim() == 2:
+            positions_flat = positions.reshape(-1)
+        else:
+            positions_flat = positions
+        
         # Apply rotary embeddings
-        q_flat, k_flat = self.rotary_emb(positions, q_flat, k_flat)
+        q_flat, k_flat = self.rotary_emb(positions_flat, q_flat, k_flat)
         
         # Reshape back to [batch_seq_len, num_heads, head_dim]
         q = q_flat.view(batch_seq_len, self.num_heads, self.head_dim)
@@ -361,6 +359,10 @@ class Qwen3AttentionFused(nn.Module):
         else:
             # Standard output projection
             output = self.o_proj(attn_output)
+        
+        # CRITICAL: Ensure output is in input dtype for residual connection
+        if output.dtype != input_dtype:
+            output = output.to(input_dtype)
             
         return output
 
@@ -390,9 +392,10 @@ class Qwen3DecoderLayer(nn.Module):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.use_custom_kernels = use_custom_kernels
-        rope_theta = getattr(config, "rope_theta", 10000)
+        rope_theta = getattr(config, "rope_theta", 1000000.0)
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
+        attention_bias = getattr(config, "attention_bias", False)
 
         if use_custom_kernels:
             # Use fused attention
@@ -405,6 +408,7 @@ class Qwen3DecoderLayer(nn.Module):
                 num_kv_heads=config.num_key_value_heads,
                 head_dim=getattr(config, "head_dim", None),
                 rms_norm_eps=config.rms_norm_eps,
+                qkv_bias=attention_bias,
                 rope_theta=rope_theta,
                 rope_scaling=rope_scaling,
                 max_position=max_position_embeddings,
@@ -420,6 +424,7 @@ class Qwen3DecoderLayer(nn.Module):
                 num_kv_heads=config.num_key_value_heads,
                 head_dim=getattr(config, "head_dim", None),
                 rms_norm_eps=config.rms_norm_eps,
+                qkv_bias=attention_bias,
                 rope_theta=rope_theta,
                 rope_scaling=rope_scaling,
                 max_position=max_position_embeddings,

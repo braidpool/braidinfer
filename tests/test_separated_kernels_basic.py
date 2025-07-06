@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from nanovllm.kernels.rmsnorm_f32 import RMSNormF32
 from nanovllm.kernels.qkv_rope_simple import QKVRoPESimple
+from nanovllm.kernels.fused_rmsnorm_qkv_with_bias import FusedRMSNormQKVWithBias
 
 
 class TestSeparatedKernelsBasic(unittest.TestCase):
@@ -137,6 +138,80 @@ class TestSeparatedKernelsBasic(unittest.TestCase):
         
         # Should be close but not identical due to precision differences
         self.assertLess(diff, 0.15, f"Difference too large: {diff}")
+    
+    def test_fused_kernel_bias_config_consistency(self):
+        """Test that fused kernel respects config when handling bias."""
+        seq_len = 16
+        hidden_dim = 256
+        num_heads = 8
+        num_kv_heads = 2
+        head_dim = hidden_dim // num_heads
+        qkv_dim = (num_heads + 2 * num_kv_heads) * head_dim
+        
+        # Create inputs
+        hidden_states = torch.randn(seq_len, hidden_dim, dtype=torch.bfloat16, device=self.device)
+        norm_weight = torch.ones(hidden_dim, dtype=torch.bfloat16, device=self.device)
+        qkv_weight = torch.randn(qkv_dim, hidden_dim, dtype=torch.bfloat16, device=self.device) * 0.02
+        
+        # Create a "corrupted" bias like in Qwen3
+        corrupted_bias = torch.full((qkv_dim,), 1e30, dtype=torch.bfloat16, device=self.device)
+        
+        print("\n✓ Testing fused kernel bias configuration handling:")
+        
+        # Test 1: With None bias (config says no bias)
+        q_none, k_none, v_none = FusedRMSNormQKVWithBias.forward(
+            hidden_states, norm_weight, qkv_weight, None,
+            num_heads, num_kv_heads, eps=1e-6
+        )
+        
+        self.assertTrue(torch.all(torch.isfinite(q_none)), "Q should be finite with None bias")
+        self.assertTrue(torch.all(torch.isfinite(k_none)), "K should be finite with None bias")
+        self.assertTrue(torch.all(torch.isfinite(v_none)), "V should be finite with None bias")
+        print("  ✓ None bias produces finite outputs")
+        
+        # Test 2: With zero bias (safe alternative)
+        zero_bias = torch.zeros(qkv_dim, dtype=torch.bfloat16, device=self.device)
+        q_zero, k_zero, v_zero = FusedRMSNormQKVWithBias.forward(
+            hidden_states, norm_weight, qkv_weight, zero_bias,
+            num_heads, num_kv_heads, eps=1e-6
+        )
+        
+        # Should be identical to None bias
+        q_diff = torch.max(torch.abs(q_none - q_zero)).item()
+        k_diff = torch.max(torch.abs(k_none - k_zero)).item()
+        v_diff = torch.max(torch.abs(v_none - v_zero)).item()
+        
+        self.assertLess(q_diff, 1e-6, "Q should be identical with None vs zero bias")
+        self.assertLess(k_diff, 1e-6, "K should be identical with None vs zero bias")
+        self.assertLess(v_diff, 1e-6, "V should be identical with None vs zero bias")
+        print("  ✓ Zero bias equivalent to None bias")
+        
+        # Test 3: Demonstrate what happens with corrupted bias
+        print("  Testing corrupted bias behavior:")
+        try:
+            q_bad, k_bad, v_bad = FusedRMSNormQKVWithBias.forward(
+                hidden_states, norm_weight, qkv_weight, corrupted_bias,
+                num_heads, num_kv_heads, eps=1e-6
+            )
+            
+            # Check if any values are non-finite
+            has_inf = (torch.isinf(q_bad).any() or torch.isinf(k_bad).any() or 
+                      torch.isinf(v_bad).any())
+            has_nan = (torch.isnan(q_bad).any() or torch.isnan(k_bad).any() or 
+                      torch.isnan(v_bad).any())
+            
+            if has_inf or has_nan:
+                print(f"    ⚠️  Corrupted bias causes inf={has_inf}, nan={has_nan}")
+            else:
+                # Even if finite, values will be extreme
+                max_val = max(q_bad.abs().max().item(), k_bad.abs().max().item(), 
+                            v_bad.abs().max().item())
+                print(f"    ⚠️  Corrupted bias causes extreme values: max={max_val:.2e}")
+                
+        except Exception as e:
+            print(f"    ⚠️  Corrupted bias causes exception: {type(e).__name__}")
+        
+        print("\n  Key insight: Always use None for bias when config specifies no bias!")
 
 
 if __name__ == '__main__':
