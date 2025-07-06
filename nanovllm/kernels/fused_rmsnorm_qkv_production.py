@@ -74,6 +74,7 @@ def fused_rmsnorm_qkv_kernel(
         ).to(tl.float32)
         
         # Accumulate squared values for RMS computation
+        # Use float32 for accumulation to match PyTorch precision
         acc_var += tl.sum(input_block * input_block, axis=1)
     
     # Compute RMS
@@ -121,13 +122,15 @@ def fused_rmsnorm_qkv_kernel(
         # Accumulate using tl.dot
         # normalized_tile is [M, K], weight_tile.T is [K, N]
         # We need weight_tile to be transposed for the multiplication
-        acc_out += tl.dot(normalized_tile.to(tl.float16), weight_tile.trans().to(tl.float16)).to(tl.float32)
+        # IMPORTANT: Keep computation in float32 for numerical stability with extreme norm weights
+        acc_out += tl.dot(normalized_tile, weight_tile.trans())
     
     # Store output
     output_mask = row_mask[:, None] & col_mask[None, :]
+    # Store as float32 for numerical stability
     tl.store(
         output_ptr + row_idx[:, None] * output_stride_seq + col_idx[None, :] * output_stride_qkv,
-        acc_out.to(tl.float16),
+        acc_out,
         mask=output_mask
     )
 
@@ -154,18 +157,20 @@ class FusedRMSNormQKV:
         """
         batch_seq_len, hidden_dim = input.shape
         qkv_dim = qkv_weight.shape[0]
-        # For Qwen3, head_dim is fixed at 128, not derived from hidden_dim
-        head_dim = 128
+        # Calculate head_dim from dimensions
+        total_heads = num_q_heads + 2 * num_kv_heads
+        head_dim = qkv_dim // total_heads
         
         # Ensure inputs are contiguous
         input = input.contiguous()
         norm_weight = norm_weight.contiguous()
         qkv_weight = qkv_weight.contiguous()
         
-        # Allocate output
+        # Allocate output - use float32 for numerical stability
+        # The extreme K normalization weights require higher precision
         output = torch.empty(
             (batch_seq_len, qkv_dim),
-            dtype=torch.float16,
+            dtype=torch.float32,
             device=input.device
         )
         

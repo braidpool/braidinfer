@@ -177,8 +177,17 @@ class Qwen3AttentionSeparated(nn.Module):
         v = v.contiguous()
         
         # Apply normalization - the norm is applied to the head_dim dimension
-        q = self.q_norm(q)
-        k = self.k_norm(k)
+        # RMSNorm expects input shape where last dim matches weight dim
+        # So we need to reshape to [seq_len * num_heads, head_dim] for normalization
+        q_for_norm = q.view(-1, self.head_dim)
+        k_for_norm = k.view(-1, self.head_dim)
+        
+        q_normed = self.q_norm(q_for_norm)
+        k_normed = self.k_norm(k_for_norm)
+        
+        # Reshape back
+        q = q_normed.view(seq_len_actual, self.num_heads, self.head_dim)
+        k = k_normed.view(seq_len_actual, self.num_kv_heads, self.head_dim)
         
         # Reshape for attention
         q_flat = q.view(seq_len * batch_size, -1)

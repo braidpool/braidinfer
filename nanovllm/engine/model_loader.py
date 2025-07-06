@@ -58,6 +58,10 @@ class ModelLoader:
             # Load weights
             try:
                 load_model(model, config.model)
+                
+                # Check for extreme K normalization weights after loading
+                if hasattr(model, 'check_extreme_weights'):
+                    model.check_extreme_weights()
             except FileNotFoundError as e:
                 raise ModelLoadError(f"Model file not found: {config.model}") from e
             except Exception as e:
@@ -93,6 +97,10 @@ class ModelLoader:
             if isinstance(module, (Attention, FlashInferCascadeAttention)):
                 # Set KV cache reference
                 module.kv_cache = page_manager.get_layer_kv_cache(layer_count)
+                layer_count += 1
+            # Also check for attention modules inside Qwen3AttentionFused
+            elif hasattr(module, 'attn') and isinstance(module.attn, (Attention, FlashInferCascadeAttention)):
+                module.attn.kv_cache = page_manager.get_layer_kv_cache(layer_count)
                 layer_count += 1
         
         return layer_count

@@ -14,6 +14,9 @@ from nanovllm.layers.linear import QKVParallelLinear, MergedColumnParallelLinear
 from nanovllm.layers.rotary_embedding import get_rope
 from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
 from nanovllm.kernels.fused_rmsnorm_qkv_production import FusedRMSNormQKV
+from nanovllm.kernels.fused_rmsnorm_qkv_float32 import FusedRMSNormQKVFloat32
+from nanovllm.kernels.fused_rmsnorm_qkv_pytorch import FusedRMSNormQKVPyTorch
+from nanovllm.kernels.fused_rmsnorm_qkv_minimal_f32 import FusedRMSNormQKVMinimalF32
 from nanovllm.kernels.chunk_attention import ChunkAttention
 
 
@@ -151,8 +154,8 @@ class Qwen3AttentionFused(nn.Module):
         self.scaling = self.head_dim**-0.5
         self.use_custom_chunk_kernel = use_custom_chunk_kernel
         
-        # Store norm weight and QKV weights for fused kernel
-        self.input_layernorm = RMSNorm(hidden_size, eps=rms_norm_eps)
+        # Store norm eps for fused kernel (weight will be passed from decoder layer)
+        self.rms_norm_eps = rms_norm_eps
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
             self.head_dim,
@@ -200,6 +203,10 @@ class Qwen3AttentionFused(nn.Module):
                 
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+        
+        # Pre-check for extreme K normalization weights at initialization
+        # This avoids the check during forward pass
+        self._use_standard_computation = None  # Will be set after weights are loaded
 
     def forward(
         self,
@@ -207,6 +214,7 @@ class Qwen3AttentionFused(nn.Module):
         hidden_states: torch.Tensor,
         context: 'InferenceContext' = None,
         residual: Optional[torch.Tensor] = None,
+        layernorm_weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         Forward pass with fused RMSNorm+QKV kernel.
@@ -221,16 +229,42 @@ class Qwen3AttentionFused(nn.Module):
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         
         # Call fused kernel (no transpose needed - weight is already [qkv_dim, hidden_dim])
-        q, k, v = FusedRMSNormQKV.forward(
-            hidden_states.float(),
-            self.input_layernorm.weight.float(),
-            self.qkv_proj.weight.float(),
-            self.num_heads,
-            self.num_kv_heads,
-            eps=self.input_layernorm.eps
-        )
+        if layernorm_weight is None:
+            raise ValueError("layernorm_weight must be provided for fused kernel")
         
-        # Add bias if present
+        # Check if this model has extreme K normalization weights
+        # If so, use standard computation for numerical stability
+        if hasattr(self, '_use_standard_computation'):
+            use_standard = self._use_standard_computation
+        else:
+            # Check once and cache the result
+            self._use_standard_computation = self.k_norm.weight.max().item() > 20
+            use_standard = self._use_standard_computation
+        
+        if use_standard:
+            # Use minimal float32 kernel for models with extreme weights
+            # This follows llama.cpp's approach: float32 only for accumulators
+            q, k, v = FusedRMSNormQKVMinimalF32.forward(
+                hidden_states,  # Keep in original dtype
+                layernorm_weight,  # Keep in original dtype
+                self.qkv_proj.weight,  # Keep in original dtype
+                self.num_heads,
+                self.num_kv_heads,
+                eps=self.rms_norm_eps
+            )
+        else:
+            # Use the fused kernel for normal models
+            # Also use minimal float32 approach for consistency
+            q, k, v = FusedRMSNormQKVMinimalF32.forward(
+                hidden_states,  # Keep in original dtype
+                layernorm_weight,  # Keep in original dtype
+                self.qkv_proj.weight,  # Keep in original dtype
+                self.num_heads,
+                self.num_kv_heads,
+                eps=self.rms_norm_eps
+            )
+        
+        # Add bias if present (both fused kernels don't include bias)
         if self.qkv_proj.bias is not None:
             qkv_bias = self.qkv_proj.bias
             q_bias = qkv_bias[:self.q_size]
@@ -247,19 +281,38 @@ class Qwen3AttentionFused(nn.Module):
             k = k + k_bias.unsqueeze(0)
             v = v + v_bias.unsqueeze(0)
         
-        # Convert back to original dtype if needed
-        if hidden_states.dtype != torch.float32:
-            q = q.to(hidden_states.dtype)
-            k = k.to(hidden_states.dtype)
-            v = v.to(hidden_states.dtype)
-            
-        # q, k, v are already shaped as [batch_seq_len, num_heads, head_dim]
         # Apply Q/K normalization
         q = self.q_norm(q)
         k = self.k_norm(k)
         
+        # Convert to original dtype for FlashInfer compatibility
+        # Note: q, k, v may be in float32 if using minimal float32 kernel
+        target_dtype = hidden_states.dtype if hidden_states.dtype != torch.float32 else torch.bfloat16
+        if q.dtype != target_dtype:
+            q = q.to(target_dtype)
+            k = k.to(target_dtype)
+            v = v.to(target_dtype)
+        
+        # Reshape q and k back to [batch_seq_len, hidden_dim] for rotary embeddings
+        batch_seq_len = q.shape[0]
+        q_flat = q.view(batch_seq_len, -1)
+        k_flat = k.view(batch_seq_len, -1)
+        
         # Apply rotary embeddings
-        q, k = self.rotary_emb(positions, q, k)
+        q_flat, k_flat = self.rotary_emb(positions, q_flat, k_flat)
+        
+        # Reshape back to [batch_seq_len, num_heads, head_dim]
+        q = q_flat.view(batch_seq_len, self.num_heads, self.head_dim)
+        k = k_flat.view(batch_seq_len, self.num_kv_heads, self.head_dim)
+        
+        # Also need to flatten v for attention
+        v_flat = v.view(batch_seq_len, -1)
+        
+        # Ensure all tensors are contiguous before passing to attention
+        # This fixes the stride mismatch issue with FlashInfer
+        q_flat = q_flat.contiguous()
+        k_flat = k_flat.contiguous()
+        v_flat = v_flat.contiguous()
         
         # Apply attention
         if self.use_custom_chunk_kernel and context is not None:
@@ -274,8 +327,9 @@ class Qwen3AttentionFused(nn.Module):
                 scale=self.scaling
             )
         else:
-            # Use standard attention
-            attn_output = self.attn(q, k, v, context)
+            # Use standard attention (doesn't use custom chunk kernel)
+            # The attention module expects q, k, v in flat shape, not head shape
+            attn_output = self.attn(q_flat, k_flat, v_flat, context)
             
         # Output projection
         if self.use_fused_output and residual is not None:
@@ -343,8 +397,9 @@ class Qwen3DecoderLayer(nn.Module):
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
 
         if use_custom_kernels:
-            # Use fused attention (no separate input_layernorm needed)
-            self.input_layernorm = None
+            # Use fused attention
+            # Note: We still need input_layernorm for weight loading compatibility
+            self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
             self.self_attn = Qwen3AttentionFused(
                 layer_idx=layer_idx,
                 hidden_size=config.hidden_size,
@@ -386,13 +441,13 @@ class Qwen3DecoderLayer(nn.Module):
         residual = hidden_states
         
         if self.use_custom_kernels:
-            # Fused kernel expects unnormalized input
+            # Fused kernel expects unnormalized input and layernorm weight
             # Check if we should use fused output projection
             if hasattr(self.self_attn, 'use_fused_output'):
                 # Pass residual for fused output projection + add
-                hidden_states = self.self_attn(positions, hidden_states, context, residual)
+                hidden_states = self.self_attn(positions, hidden_states, context, residual, self.input_layernorm.weight)
             else:
-                hidden_states = self.self_attn(positions, hidden_states, context)
+                hidden_states = self.self_attn(positions, hidden_states, context, layernorm_weight=self.input_layernorm.weight)
                 hidden_states = residual + hidden_states
         else:
             # Standard path with separate normalization
@@ -427,6 +482,8 @@ class Qwen3Model(nn.Module):
         context: 'InferenceContext' = None,
     ) -> torch.Tensor:
         hidden_states = self.embed_tokens(input_ids)
+        # Apply embedding scaling as per QWEN3_NUMERICAL_STABILITY_GUIDE.md
+        hidden_states = hidden_states * (1.0 / (self.config.hidden_size ** 0.5))
         for i in range(len(self.layers)):
             layer = self.layers[i]
             hidden_states = layer(positions, hidden_states, context)
@@ -449,6 +506,15 @@ class Qwen3ForCausalLM(nn.Module):
         self.use_custom_kernels = use_custom_kernels
         self.model = Qwen3Model(config, use_custom_kernels)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size, bias=False)
+    
+    def check_extreme_weights(self):
+        """Check for extreme K normalization weights after model is loaded."""
+        if self.use_custom_kernels:
+            for i, layer in enumerate(self.model.layers):
+                if hasattr(layer.self_attn, 'k_norm') and hasattr(layer.self_attn.k_norm, 'weight'):
+                    if layer.self_attn.k_norm.weight is not None:
+                        max_weight = layer.self_attn.k_norm.weight.max().item()
+                        layer.self_attn._use_standard_computation = max_weight > 20
 
     def forward(
         self,

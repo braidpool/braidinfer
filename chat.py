@@ -19,7 +19,7 @@ class FastChat:
     def __init__(
         self,
         model_path: str = "Qwen/Qwen2.5-0.5B-Instruct",
-        use_custom_kernels: bool = True,
+        use_custom_kernels: bool = False,  # Disabled by default due to issues
     ):
         """Initialize the chat interface."""
         print("Loading model...", end="", flush=True)
@@ -247,11 +247,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run with custom kernels (default)
+  # Run with default settings (custom kernels disabled)
   python chat.py
   
-  # Run without custom kernels for comparison
-  python chat.py --no-custom-kernels
+  # Run with custom kernels (experimental - currently produces gibberish)
+  python chat.py --custom-kernels
   
   # Use a different model
   python chat.py --model meta-llama/Llama-2-7b-chat-hf
@@ -264,9 +264,9 @@ Examples:
         help="Model to use (HuggingFace model name or local path)"
     )
     parser.add_argument(
-        "--no-custom-kernels",
+        "--custom-kernels",
         action="store_true",
-        help="Disable custom kernels (run standard implementation)"
+        help="Enable custom kernels (experimental - currently produces gibberish)"
     )
     
     args = parser.parse_args()
@@ -274,13 +274,13 @@ Examples:
     # Show configuration
     print(f"Configuration:")
     print(f"  Model: {args.model}")
-    print(f"  Custom kernels: {'disabled' if args.no_custom_kernels else 'enabled'}")
+    print(f"  Custom kernels: {'enabled' if args.custom_kernels else 'disabled'}")
     print()
     
     # Create and run chat interface
     chat = FastChat(
         model_path=args.model,
-        use_custom_kernels=not args.no_custom_kernels,
+        use_custom_kernels=args.custom_kernels,
     )
     
     try:
