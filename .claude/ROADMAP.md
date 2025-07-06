@@ -31,14 +31,50 @@
     - [x] Implemented yield-based token generation
     - [x] Created chat interfaces with real-time output
     - [x] Verified minimal overhead for streaming
+- [x] Fused Kernel Optimization Sprint (Successful kernel, failed integration):
+    - [x] Re-implemented fused RMSNorm+QKV with proper tiling
+    - [x] Achieved 12.72x speedup for isolated kernel
+    - [x] Discovered numerical instability with Qwen3 model
+    - [x] Root cause: Extreme K norm weights (up to 96.5) cause explosion
+- [x] Fix Chat.py Gibberish Sprint (Incomplete - Issue Identified):
+    - [x] Applied embedding scaling (1/sqrt(hidden_size))
+    - [x] Verified RoPE theta configuration (1,000,000)
+    - [x] Identified Layer 1 numerical explosion (values reach 1e29)
+    - [x] Custom kernels disabled by default due to instability
+- [x] FlashInfer Integration Debug Sprint (Root Cause Found):
+    - [x] Created forensic tensor comparison
+    - [x] Investigated tensor metadata (dtype, shape, stride)
+    - [x] Tested multiple fixes (contiguous, normalization)
+    - [x] Found: Layer 1 explodes inside FlashInfer with fused path
+    - [x] Issue remains unresolved - very subtle integration bug
+- [ ] Separate RMSNorm from QKV Fusion Sprint (60% Complete):
+    - [x] Architectural review - identified llama.cpp approach
+    - [x] Create standalone RMSNorm kernel (2.19x faster than PyTorch)
+    - [x] Create QKV+RoPE fused kernel
+    - [x] Refactor Qwen3AttentionFused to use separated kernels
+    - [x] Update decoder layer implementation
+    - [x] Integration testing complete
+    - [ ] Performance optimization
+    - [ ] Extended testing with Qwen3-0.6B
+    - [ ] Documentation and cleanup
+    - [ ] Sprint review
 
-## Current Status: Performance Reality
+## Current Status: Performance & Stability
 - **Actual Performance**: ~29 tok/s (batch size 1)
-- **With Custom Kernels**: ~27 tok/s (slower!)
+- **With Custom Kernels**: Non-functional due to numerical instability
+- **Isolated Kernel Performance**: 12.72x faster than PyTorch
 - **Batch Size 8**: ~237 tok/s (using FlashInfer)
-- **Root Issue**: Triton kernels poorly optimized, 15x slower than PyTorch
+- **Root Issue**: Numerical instability with Qwen3's extreme weight values
+- **Secondary Issue**: Limited performance gain due to Amdahl's Law (only 48% of compute)
 
-## Next Sprint Options (Realistic)
+## Current Status: Custom Kernels Blocked by FlashInfer Integration
+
+Despite extensive debugging, the fused kernels cause numerical explosion in Layer 1 when used with FlashInfer. The issue appears to be a very subtle integration incompatibility that goes beyond simple tensor properties (dtype, shape, stride, contiguity).
+
+### Recommendation
+Proceed with alternative optimization approaches (quantization, system optimizations) while the FlashInfer integration issue remains unresolved. The fused kernel works correctly in isolation (12.72x speedup) but fails in the full pipeline.
+
+## Next Sprint Options (After Stability Fix)
 
 ### Option 1: Quantization (Most Promising)
 - [ ] INT8/INT4 quantization with bitsandbytes or GPTQ
@@ -46,17 +82,17 @@
 - [ ] Maintain model quality with proper calibration
 - [ ] Easy integration with existing code
 
-### Option 2: System Optimizations
+### Option 2: Complete Kernel Fusion
+- [ ] Fix numerical stability first
+- [ ] Implement MLP fusion (if stability allows)
+- [ ] Fuse attention output projection
+- [ ] Expected: 2x speedup if Amdahl's Law permits
+
+### Option 3: System Optimizations
 - [ ] Memory pooling to reduce allocation overhead
 - [ ] Better KV cache management
 - [ ] Optimize for single-user continuous generation
 - [ ] Expected: 20-30% improvement
-
-### Option 3: Use Proven Kernels
-- [ ] Integrate FlashAttention v3
-- [ ] Use cuBLAS/cuDNN optimally
-- [ ] Remove poorly performing custom kernels
-- [ ] Expected: Return to baseline performance
 
 ## Future Sprints
 
