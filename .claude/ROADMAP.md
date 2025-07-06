@@ -77,7 +77,17 @@ The investigation revealed that the existing `FusedRMSNormQKVMinimalF32` kernel 
 
 The performance gap vs llama.cpp (29 vs 400+ tok/s) is NOT due to numerical issues but rather system-level optimizations.
 
-## Next Sprint Options (After Stability Fix)
+## Current Sprint: Demos and Examples Update
+
+### Sprint: Update Demos to Showcase ChunkedLLM API
+- [ ] Audit cli.py - fix system prompt not being seen by LLM
+- [ ] Update chat.py to use ChunkedLLM with context reuse
+- [ ] Add <think> tag filtering to chat.py
+- [ ] Implement conversation chunk construction in chat.py
+- [ ] Audit all examples in examples/ directory
+- [ ] Ensure all demos properly showcase the project's capabilities
+
+## Next Sprint Options (After Demos Update)
 
 ### Option 1: Quantization (Most Promising)
 - [ ] INT8/INT4 quantization with bitsandbytes or GPTQ

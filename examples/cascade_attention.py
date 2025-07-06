@@ -4,6 +4,10 @@ Simple example demonstrating cascade attention feature in nano-vllm.
 
 This example shows how cascade attention can save memory by sharing
 common prefixes (like system prompts) across multiple requests.
+
+NOTE: This example uses the low-level LLM API. For a simpler approach
+using automatic cascade attention, see cascade_attention_chunked.py
+which demonstrates the ChunkedLLM API.
 """
 
 import os

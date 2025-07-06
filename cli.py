@@ -67,6 +67,34 @@ class CascadeCLI:
             self.console.print(f"[bold red]Failed to initialize model: {e}[/bold red]")
             sys.exit(1)
     
+    def _filter_think_tags(self, text: str) -> str:
+        """Remove <think>...</think> sections from text."""
+        filtered_parts = []
+        current_pos = 0
+        
+        while True:
+            # Find next <think> tag
+            think_start = text.find("<think>", current_pos)
+            if think_start == -1:
+                # No more think tags
+                filtered_parts.append(text[current_pos:])
+                break
+            
+            # Add text before <think>
+            filtered_parts.append(text[current_pos:think_start])
+            
+            # Find matching </think>
+            think_end = text.find("</think>", think_start)
+            if think_end == -1:
+                # Unclosed think tag - include it
+                filtered_parts.append(text[think_start:])
+                break
+            
+            think_end += len("</think>")
+            current_pos = think_end
+        
+        return "".join(filtered_parts).strip()
+    
     def render_header(self) -> Panel:
         """Render the header panel."""
         model_name = Path(self.model_path).name
@@ -338,15 +366,18 @@ class CascadeCLI:
             
             elapsed = time.time() - start_time
             
-            # Update state
-            self.state.last_output = output['text']
+            # Filter think tags from output
+            filtered_output = self._filter_think_tags(output['text'])
+            
+            # Update state with filtered output
+            self.state.last_output = filtered_output
             self.state.generation_time = elapsed
             self.state.tokens_generated = len(output.get('token_ids', []))
             
             # Show output
             self.console.print("\n[bold green]Generation complete![/bold green]")
             self.console.print(Rule())
-            self.console.print(output['text'])
+            self.console.print(filtered_output)
             self.console.print(Rule())
             self.console.print(f"\n[dim]Generated {self.state.tokens_generated} tokens in {elapsed:.2f}s[/dim]")
             

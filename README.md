@@ -25,14 +25,51 @@ huggingface-cli download --resume-download Qwen/Qwen3-0.6B \
 
 ## Quick Start
 
-See `example.py` for usage. The API mirrors vLLM's interface with minor differences in the `LLM.generate` method:
+### Basic Usage
 ```python
 from nanovllm import LLM, SamplingParams
-llm = LLM("/YOUR/MODEL/PATH", enforce_eager=True, tensor_parallel_size=1)
+llm = LLM("/YOUR/MODEL/PATH", enforce_eager=True)
 sampling_params = SamplingParams(temperature=0.6, max_tokens=256)
 prompts = ["Hello, Nano-vLLM."]
 outputs = llm.generate(prompts, sampling_params)
 outputs[0]["text"]
+```
+
+### ChunkedLLM API (Recommended for context reuse)
+```python
+from nanovllm import ChunkedLLM, ChunkType
+llm = ChunkedLLM("/YOUR/MODEL/PATH", enable_deduplication=True)
+
+# Register reusable chunks
+system_id = llm.register_chunk("You are a helpful assistant.", ChunkType.SYSTEM_PROMPT)
+query_id = llm.register_chunk("What is Python?", ChunkType.QUERY)
+
+# Generate with automatic cascade attention
+output = llm.generate_from_chunks(system_id, query_id)
+print(output['text'])
+```
+
+See the `examples/` directory for more usage patterns.
+
+## Demo Applications
+
+### Interactive Demos
+- **`cli.py`** - Rich CLI with visual chunk management and cascade attention
+- **`chat_chunked.py`** - Chat interface demonstrating conversation chunk reuse
+- **`chat.py`** - Simple streaming chat interface (standard API)
+
+### Examples
+- **Basic Usage** - Simple generation examples
+- **Cascade Attention** - Memory-efficient shared context
+- **Chunked API** - Content deduplication and reuse
+- **Conversation Reuse** - Efficient multi-turn conversations
+- **Multi-Agent** - Multiple AI personas sharing context
+
+Run any demo with:
+```bash
+python cli.py                    # Visual chunk management interface
+python chat_chunked.py           # Chat with chunk reuse statistics
+python examples/multi_agent.py   # Multiple agents analyzing shared data
 ```
 
 ## Benchmark
