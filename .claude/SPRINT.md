@@ -67,15 +67,14 @@ Refactor the fused RMSNorm+QKV kernel to match llama.cpp's approach: compute RMS
 **Kernels:**
 - `nanovllm/kernels/rmsnorm_f32.py`
 - `nanovllm/kernels/qkv_rope_simple.py`
-- `nanovllm/kernels/qkv_rope_fused.py` (alternative implementation)
 
 **Models:**
-- `nanovllm/models/qwen3_separated.py`
+- (Model integration was experimental and not completed)
 
 **Tests:**
 - `tests/test_rmsnorm_f32.py` - ✅ All tests pass
 - `tests/test_qkv_rope_simple.py` - ✅ All tests pass
-- `tests/test_qwen3_separated.py` - ⚠️ Model tests have shape issues
+- (Model integration tests were removed due to architectural issues)
 - `tests/test_numerical_stability.py` - New comprehensive stability tests
 - `tests/test_sprint_edge_cases.py` - Tests for specific issues encountered
 - `tests/test_separated_kernels_basic.py` - ✅ Basic pipeline tests pass
