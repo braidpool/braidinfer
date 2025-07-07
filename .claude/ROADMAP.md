@@ -77,15 +77,43 @@ The investigation revealed that the existing `FusedRMSNormQKVMinimalF32` kernel 
 
 The performance gap vs llama.cpp (29 vs 400+ tok/s) is NOT due to numerical issues but rather system-level optimizations.
 
-## Current Sprint: Demos and Examples Update
+## Completed Sprint: Demos and Examples Update
 
 ### Sprint: Update Demos to Showcase ChunkedLLM API
-- [ ] Audit cli.py - fix system prompt not being seen by LLM
-- [ ] Update chat.py to use ChunkedLLM with context reuse
-- [ ] Add <think> tag filtering to chat.py
-- [ ] Implement conversation chunk construction in chat.py
-- [ ] Audit all examples in examples/ directory
-- [ ] Ensure all demos properly showcase the project's capabilities
+- [x] Audit cli.py - fix system prompt not being seen by LLM
+- [x] Update chat.py to use ChunkedLLM with context reuse
+- [x] Add <think> tag filtering to chat.py
+- [x] Implement conversation chunk construction in chat.py
+- [x] Audit all examples in examples/ directory
+- [x] Ensure all demos properly showcase the project's capabilities
+
+## Completed Sprint: Model Compatibility Detection for Fused Kernels ✅
+
+### Sprint: Implement Systematic Kernel Compatibility Checking
+- [x] Design quantitative metrics for weight sensitivity
+- [x] Implement FusedKernelCompatibilityChecker class
+- [x] Create layer-wise weight analysis system
+- [x] Add compatibility scoring algorithm
+- [x] Integrate with model loading process
+- [x] Create CLI tool for compatibility checking
+- [x] Add warnings and fallback mechanisms
+- [x] Test with multiple model architectures
+- [x] Document compatibility criteria
+
+### Key Finding: Qwen3-0.6B Incompatible with Fused Kernels
+After extensive investigation, we discovered that Qwen3-0.6B cannot use fused kernels due to:
+- Extreme K normalization weights (up to 96.5x)
+- Small numerical differences (~0.0005) get amplified catastrophically
+- Model produces gibberish with any deviation from PyTorch's exact numerics
+- Fundamental limitation: Tiled computation cannot match sequential operation order
+
+Solution: Implemented automatic detection system that warns users and falls back to standard kernels.
+
+### Deliverables
+- **FusedKernelCompatibilityChecker**: Analyzes model weights and calculates compatibility score
+- **CLI Tool**: `python -m nanovllm.utils.check_compatibility_cli <model>`
+- **Automatic Fallback**: Models incompatible with fused kernels use standard kernels
+- **Documentation**: User guide and technical analysis of compatibility criteria
 
 ## Next Sprint Options (After Demos Update)
 

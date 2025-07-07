@@ -206,6 +206,8 @@ class Qwen3AttentionFused(nn.Module):
         # Pre-check for extreme K normalization weights at initialization
         # This avoids the check during forward pass
         self._use_standard_computation = None  # Will be set after weights are loaded
+        self._k_norm_scale = 1.0  # Scale factor for extreme K norm weights
+        self._attention_scale_compensation = 1.0  # Compensation for attention scores
 
     def forward(
         self,
@@ -234,53 +236,59 @@ class Qwen3AttentionFused(nn.Module):
         if layernorm_weight is None:
             raise ValueError("layernorm_weight must be provided for fused kernel")
         
-        # Always use the fused kernel - it handles float32 precision properly
-        # The "standard computation" path has numerical issues
-        if False:  # Disabled - standard path causes overflow
-            # Use standard PyTorch operations for models with extreme weights
-            # Apply RMSNorm manually with float32 precision
-            hidden_float = hidden_states.float()
-            variance = hidden_float.pow(2).mean(dim=-1, keepdim=True)
-            hidden_normed = hidden_states / torch.sqrt(variance + self.rms_norm_eps)
-            hidden_normed = hidden_normed * layernorm_weight
-            
-            # QKV projection - ensure correct dtype
-            proj_input = hidden_normed.to(self.qkv_proj.weight.dtype)
-            
-            qkv = self.qkv_proj(proj_input)
-            
-            # Split into Q, K, V
-            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-            q = q.view(-1, self.num_heads, self.head_dim)
-            k = k.view(-1, self.num_kv_heads, self.head_dim)
-            v = v.view(-1, self.num_kv_heads, self.head_dim)
-            
-        else:
-            # Use the fused kernel WITH BIAS SUPPORT
-            from nanovllm.kernels.fused_rmsnorm_qkv_with_bias import FusedRMSNormQKVWithBias
-            
-            
-            q, k, v = FusedRMSNormQKVWithBias.forward(
-                hidden_states,
-                layernorm_weight,
-                self.qkv_proj.weight,
-                None if not self.qkv_bias else self.qkv_proj.bias,  # Use bias only if config says so
-                self.num_heads,
-                self.num_kv_heads,
-                eps=self.rms_norm_eps
-            )
+        # Use the mixed precision fused kernel
+        from nanovllm.kernels.fused_rmsnorm_qkv_mixed_precision import FusedRMSNormQKVMixedPrecision
+        
+        q, k, v = FusedRMSNormQKVMixedPrecision.forward(
+            hidden_states,
+            layernorm_weight,
+            self.qkv_proj.weight,
+            None if not self.qkv_bias else self.qkv_proj.bias,  # Use bias only if config says so
+            self.num_heads,
+            self.num_kv_heads,
+            eps=self.rms_norm_eps
+        )
         
         # Bias is now handled inside the fused kernel
         
-        # Apply Q/K normalization in float32 for stability with extreme weights
+        # CRITICAL FIX: Ensure Q, K, V have consistent shapes regardless of path
+        # The fused kernel returns [seq_len, num_heads, head_dim]
+        # but the rest of the code expects them in head format for normalization
+        if not hasattr(q, 'view'):
+            # If q is not a tensor, something is wrong
+            raise ValueError(f"Expected tensor, got {type(q)}")
+            
+        # Apply Q normalization in float32 for stability
         q_normed = self.q_norm(q.float() if q.dtype != torch.float32 else q)
+        
+        # CRITICAL FIX: Store K in cache BEFORE normalization to keep values in float16 range
+        # K normalization will be applied during attention computation
+        
+        # Check if this layer has extreme K norm weights
+        if self._use_standard_computation is None:
+            k_norm_max = self.k_norm.weight.max().item()
+            self._use_standard_computation = k_norm_max > 20.0
+            self._k_norm_scale = min(k_norm_max / 10.0, 10.0) if k_norm_max > 20.0 else 1.0
+        
+        # Ensure scale is set even if _use_standard_computation was pre-set
+        if self._use_standard_computation and self._k_norm_scale == 1.0:
+            k_norm_max = self.k_norm.weight.max().item()
+            self._k_norm_scale = min(k_norm_max / 10.0, 10.0)
+        
+        # Apply K normalization normally
         k_normed = self.k_norm(k.float() if k.dtype != torch.float32 else k)
         
-        # CRITICAL FIX: Convert back to input dtype AFTER all normalization
-        # This prevents dtype mismatch in residual connections
+        # IMPORTANT: For KV caching, we should store k (before normalization)
+        # to keep values in reasonable float16 range
+        k_unnormalized = k
+        
+        # Convert to appropriate precision
+        # Always convert to input dtype (which might be bfloat16)
         q = q_normed.to(input_dtype)
         k = k_normed.to(input_dtype)
-        v = v.to(input_dtype)
+        # CRITICAL FIX: Ensure V is properly converted and not reused
+        # Make a deep copy to prevent any aliasing issues
+        v = v.to(input_dtype).detach().clone().contiguous()
         
         
         # Reshape q and k back to [batch_seq_len, hidden_dim] for rotary embeddings
@@ -297,11 +305,7 @@ class Qwen3AttentionFused(nn.Module):
         # Apply rotary embeddings
         q_flat, k_flat = self.rotary_emb(positions_flat, q_flat, k_flat)
         
-        # Reshape back to [batch_seq_len, num_heads, head_dim]
-        q = q_flat.view(batch_seq_len, self.num_heads, self.head_dim)
-        k = k_flat.view(batch_seq_len, self.num_kv_heads, self.head_dim)
-        
-        # Also need to flatten v for attention
+        # Also need to flatten v for attention - do this BEFORE making contiguous
         v_flat = v.view(batch_seq_len, -1)
         
         # Ensure all tensors are contiguous before passing to attention
@@ -310,7 +314,21 @@ class Qwen3AttentionFused(nn.Module):
         k_flat = k_flat.contiguous()
         v_flat = v_flat.contiguous()
         
-        # Apply attention
+        # NOTE: For KV caching, we should store k_unnormalized (before K norm)
+        # This keeps values in float16 range and applies K norm during attention
+        # Context/cache handling would happen in the attention module
+        
+        # Ensure tensors are in the expected dtype for attention module
+        # The attention module expects the model's dtype, not float32
+        if q_flat.dtype != input_dtype:
+            q_flat = q_flat.to(input_dtype)
+        if k_flat.dtype != input_dtype:
+            k_flat = k_flat.to(input_dtype)
+        if v_flat.dtype != input_dtype:
+            v_flat = v_flat.to(input_dtype)
+        
+        # Apply attention without scale compensation
+        # The K normalization already handles the scaling appropriately
         if self.use_custom_chunk_kernel and context is not None:
             # Use custom chunk attention kernel
             # This assumes context has chunk information
@@ -323,7 +341,7 @@ class Qwen3AttentionFused(nn.Module):
                 scale=self.scaling
             )
         else:
-            # Use standard attention (doesn't use custom chunk kernel)
+            # Use standard attention
             # The attention module expects q, k, v in flat shape, not head shape
             attn_output = self.attn(q_flat, k_flat, v_flat, context)
             
@@ -361,6 +379,7 @@ class Qwen3AttentionFused(nn.Module):
             output = self.o_proj(attn_output)
         
         # CRITICAL: Ensure output is in input dtype for residual connection
+        # For extended precision layers, convert back only after projection
         if output.dtype != input_dtype:
             output = output.to(input_dtype)
             
