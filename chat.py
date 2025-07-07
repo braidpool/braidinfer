@@ -19,7 +19,7 @@ class FastChat:
     def __init__(
         self,
         model_path: str = "Qwen/Qwen2.5-0.5B-Instruct",
-        use_custom_kernels: bool = False,  # Disabled by default due to issues
+        use_custom_kernels: bool = False,  # Still produces gibberish output
     ):
         """Initialize the chat interface."""
         print("Loading model...", end="", flush=True)
@@ -75,16 +75,31 @@ class FastChat:
         return "".join(filtered_parts)
     
     def _format_messages(self) -> str:
-        """Format conversation history for the model."""
-        prompt = ""
-        for msg in self.messages:
-            if msg["role"] == "user":
-                prompt += f"<|im_start|>user\n{msg['content']}<|im_end|>\n"
-            else:
-                prompt += f"<|im_start|>assistant\n{msg['content']}<|im_end|>\n"
+        """Format conversation history for the model using its chat template."""
+        # Use the tokenizer's chat template if available
+        if hasattr(self.llm.tokenizer, 'apply_chat_template'):
+            # The tokenizer will add the appropriate formatting
+            # We need to add a partial assistant message to continue generation
+            messages_with_partial = self.messages + [{"role": "assistant", "content": ""}]
+            prompt = self.llm.tokenizer.apply_chat_template(
+                messages_with_partial,
+                tokenize=False,
+                add_generation_prompt=False
+            )
+            # Remove any trailing newlines that might interfere
+            prompt = prompt.rstrip()
+        else:
+            # Fallback to Qwen format if no chat template
+            prompt = ""
+            for msg in self.messages:
+                if msg["role"] == "user":
+                    prompt += f"<|im_start|>user\n{msg['content']}<|im_end|>\n"
+                else:
+                    prompt += f"<|im_start|>assistant\n{msg['content']}<|im_end|>\n"
+            
+            # Add start of assistant response
+            prompt += "<|im_start|>assistant\n"
         
-        # Add start of assistant response
-        prompt += "<|im_start|>assistant\n"
         return prompt
     
     def generate_response(self, user_input: str) -> None:
@@ -247,11 +262,11 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Run with default settings (custom kernels disabled)
+  # Run with default settings (custom kernels enabled)
   python chat.py
   
-  # Run with custom kernels (experimental - currently produces gibberish)
-  python chat.py --custom-kernels
+  # Run without custom kernels
+  python chat.py --no-custom-kernels
   
   # Use a different model
   python chat.py --model meta-llama/Llama-2-7b-chat-hf
@@ -266,21 +281,22 @@ Examples:
     parser.add_argument(
         "--custom-kernels",
         action="store_true",
-        help="Enable custom kernels (experimental - currently produces gibberish)"
+        help="Enable custom kernels (warning: produces gibberish output)"
     )
     
     args = parser.parse_args()
     
     # Show configuration
+    use_custom_kernels = args.custom_kernels
     print(f"Configuration:")
     print(f"  Model: {args.model}")
-    print(f"  Custom kernels: {'enabled' if args.custom_kernels else 'disabled'}")
+    print(f"  Custom kernels: {'enabled' if use_custom_kernels else 'disabled'}")
     print()
     
     # Create and run chat interface
     chat = FastChat(
         model_path=args.model,
-        use_custom_kernels=args.custom_kernels,
+        use_custom_kernels=use_custom_kernels,
     )
     
     try:

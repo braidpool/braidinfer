@@ -137,6 +137,9 @@ class ModelRunner:
             q_indptr[i + 1] = q_indptr[i] + seq_len
         
         # Plan prefill once for all layers
+        # Calculate attention scale based on head dimension
+        sm_scale = self.head_dim ** -0.5
+        
         self.prefill_wrapper.plan(
             q_indptr,
             kv_indptr,
@@ -147,6 +150,8 @@ class ModelRunner:
             self.head_dim,
             self.block_size,
             causal=True,
+            pos_encoding_mode="NONE",  # RoPE already applied in model
+            sm_scale=sm_scale,
             q_data_type=self.dtype,
             kv_data_type=self.dtype
         )
@@ -174,6 +179,9 @@ class ModelRunner:
         )
         
         # Plan decode once for all layers
+        # Calculate attention scale based on head dimension
+        sm_scale = self.head_dim ** -0.5
+        
         self.decode_wrapper.plan(
             kv_indptr,
             kv_indices,
@@ -182,6 +190,8 @@ class ModelRunner:
             self.num_kv_heads,
             self.head_dim,
             self.block_size,
+            pos_encoding_mode="NONE",  # RoPE already applied in model
+            sm_scale=sm_scale,
             kv_data_type=self.dtype,
             q_data_type=self.dtype
         )

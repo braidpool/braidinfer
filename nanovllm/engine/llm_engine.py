@@ -47,7 +47,7 @@ class LLMEngine:
         self.model_runner = ModelRunner(config)
         
         # Load tokenizer
-        self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
+        self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True, trust_remote_code=True)
         config.eos = self.tokenizer.eos_token_id
         
         # Initialize scheduler

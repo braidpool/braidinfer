@@ -33,9 +33,12 @@ This is nano-vllm, a single-GPU optimized implementation of vLLM focused on high
 - Plan-run pattern for FlashInfer operations
 
 ## Model Support
-- Qwen3 models (with RoPE, GQA)
+- Qwen3 models (with RoPE, GQA) - ⚠️ Incompatible with fused kernels due to extreme K weights
 - GPT-2 models (no RoPE, no GQA) - partial support
+- LLaMA models (TinyLlama tested) - ✅ Compatible with fused kernels
+- ERNIE-4.5 models - ⚠️ Implementation issues (produces gibberish)
 - HuggingFace cache location support (~/.cache/huggingface/hub/)
+- Trust remote code support for custom model implementations
 
 ## Optimization Progress
 1. **Completed**: 
@@ -43,6 +46,8 @@ This is nano-vllm, a single-GPU optimized implementation of vLLM focused on high
    - Chunk attention with online softmax (2,938 tok/s capability)
    - Position-aware KV cache generation
    - Custom kernel integration framework
+   - Model compatibility detection system
+   - TinyLlama works with fused kernels!
 2. **Next**: 
    - MLP block fusion (Gate + Up + Down projections)
    - Attention output fusion (Output projection + residual)
@@ -56,3 +61,6 @@ This is nano-vllm, a single-GPU optimized implementation of vLLM focused on high
 1. Model warmup was removed during refactoring
 2. Some error handling and metrics code was removed
 3. GPT-2 weight loading has some issues with transformer. prefix
+4. Qwen3 models incompatible with fused kernels due to extreme K normalization weights (96.5x)
+5. ERNIE-4.5 implementation produces gibberish (works with vanilla transformers)
+6. Chat template must be model-specific (fixed in chat.py)

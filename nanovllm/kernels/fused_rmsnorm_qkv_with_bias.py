@@ -232,9 +232,9 @@ class FusedRMSNormQKVWithBias:
         
         q, k, v = output.split([q_dim, k_dim, v_dim], dim=-1)
         
-        # Reshape
-        q = q.view(batch_seq_len, num_q_heads, head_dim)
-        k = k.view(batch_seq_len, num_kv_heads, head_dim)
-        v = v.view(batch_seq_len, num_kv_heads, head_dim)
+        # Reshape and make contiguous to prevent view issues
+        q = q.view(batch_seq_len, num_q_heads, head_dim).contiguous()
+        k = k.view(batch_seq_len, num_kv_heads, head_dim).contiguous()
+        v = v.view(batch_seq_len, num_kv_heads, head_dim).contiguous()
         
         return q, k, v

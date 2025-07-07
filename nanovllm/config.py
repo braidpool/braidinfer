@@ -29,11 +29,11 @@ class Config:
     def __post_init__(self):
         # Check if it's a local directory first
         if os.path.isdir(self.model):
-            self.hf_config = AutoConfig.from_pretrained(self.model)
+            self.hf_config = AutoConfig.from_pretrained(self.model, trust_remote_code=True)
         else:
             # Try HuggingFace model ID - this will use the cache automatically
             try:
-                self.hf_config = AutoConfig.from_pretrained(self.model)
+                self.hf_config = AutoConfig.from_pretrained(self.model, trust_remote_code=True)
                 # Note: When using a model ID, transformers will handle the cache location
                 # It will download to ~/.cache/huggingface/hub/ if not already cached
             except Exception as e:

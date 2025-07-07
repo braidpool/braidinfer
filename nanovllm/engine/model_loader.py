@@ -8,6 +8,8 @@ from typing import Optional
 from nanovllm.config import Config
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.models.gpt2 import GPT2ForCausalLM
+from nanovllm.models.llama import LlamaForCausalLM
+from nanovllm.models.ernie import ERNIE45ForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.layers.attention import Attention
 from nanovllm.layers.flashinfer_cascade_attention import FlashInferCascadeAttention
@@ -44,6 +46,12 @@ class ModelLoader:
                     model = Qwen3ForCausalLM(hf_config, use_custom_kernels=use_custom_kernels)
                 elif model_type == "gpt2":
                     model = GPT2ForCausalLM(hf_config)
+                elif model_type == "llama":
+                    use_custom_kernels = getattr(config, 'use_custom_kernels', False)
+                    model = LlamaForCausalLM(hf_config, use_custom_kernels=use_custom_kernels)
+                elif model_type == "ernie4_5":
+                    use_custom_kernels = getattr(config, 'use_custom_kernels', False)
+                    model = ERNIE45ForCausalLM(hf_config, use_custom_kernels=use_custom_kernels)
                 else:
                     raise ModelLoadError(f"Unsupported model type: {model_type}")
                 

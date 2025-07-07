@@ -42,12 +42,12 @@ def load_model(model: nn.Module, model_name_or_path: str):
         from transformers.utils import cached_file
         try:
             # Try to get the safetensors file from cache
-            weight_file = cached_file(model_name_or_path, "model.safetensors")
+            weight_file = cached_file(model_name_or_path, "model.safetensors", _raise_exceptions_for_missing_entries=False, _raise_exceptions_for_connection_errors=False)
             weight_files = [weight_file]
         except:
             # Fallback to pytorch_model.bin
             try:
-                weight_file = cached_file(model_name_or_path, "pytorch_model.bin")
+                weight_file = cached_file(model_name_or_path, "pytorch_model.bin", _raise_exceptions_for_missing_entries=False, _raise_exceptions_for_connection_errors=False)
                 state_dict = torch.load(weight_file, map_location="cpu")
                 for name, param in state_dict.items():
                     # Handle GPT-2 naming
