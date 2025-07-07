@@ -81,6 +81,45 @@ normalized_f32 = input.to(float32) / rms * norm_weight.to(float32)
 normalized = normalized_f32.to(float16)  # Convert only after normalization
 ```
 
+### Critical Discovery: BFloat16 Conversion Point Must Match PyTorch
+
+A subtle but critical precision issue has been identified that causes gibberish output even when kernels appear to compute correctly. The issue is the **exact point** where float32 is converted to bfloat16.
+
+#### The Problem
+
+When implementing fused kernels, there are two possible conversion strategies:
+1. **Kernel approach (incorrect)**: Compute everything in float32, convert to bfloat16 at the end
+2. **PyTorch approach (correct)**: Convert to bfloat16 after normalization but before matrix multiplication
+
+This difference creates small rounding errors (typically ~0.0078) that get amplified 96x by Qwen3's extreme K normalization weights, resulting in completely different model outputs.
+
+#### The Solution
+
+Fused kernels must match PyTorch's conversion behavior exactly:
+
+```python
+# Incorrect: Convert after matmul
+normalized_f32 = (input_f32 / rms) * norm_weight_f32
+output_f32 = matmul(normalized_f32, weight_f32)
+output = output_f32.to(bfloat16)  # Different rounding than PyTorch!
+
+# Correct: Convert before matmul (matching PyTorch)
+normalized_f32 = (input_f32 / rms) * norm_weight_f32
+normalized = normalized_f32.to(bfloat16)  # Convert here!
+output = matmul(normalized, weight.to(bfloat16))  # Matmul in bfloat16
+```
+
+#### Verification
+
+A correctly implemented kernel should show:
+- Exact match with PyTorch (0.000000 difference)
+- Stable values even after 96.5x K normalization
+- No divergence across multiple layers
+
+#### Key Insight
+
+The numerical differences come from different rounding points, not from computation errors. Even though both approaches are "correct" mathematically, they produce different results due to floating-point rounding. Since the model was trained with PyTorch's specific rounding behavior, kernels must match it exactly.
+
 ### Error Amplification
 
 With extreme K normalization weights, even tiny errors get amplified exponentially:

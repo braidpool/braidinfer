@@ -1,23 +1,22 @@
 """
-Fused RMSNorm + QKV projection with mixed precision matching standard path.
+Fused RMSNorm + QKV projection with PyTorch-compatible bfloat16 conversion.
 
-Key difference from original: Performs normalization in input dtype (bfloat16)
-rather than float32 throughout, matching PyTorch's numerical behavior.
+This kernel matches PyTorch's numerical behavior exactly by converting to bfloat16
+at the same point PyTorch does - after normalization but before matrix multiplication.
 """
 
 import torch
 import triton
 import triton.language as tl
-from typing import Tuple, Optional
+from typing import Tuple
 
 
 @triton.jit
-def fused_rmsnorm_qkv_mixed_precision_kernel(
+def fused_rmsnorm_qkv_pytorch_compat_kernel(
     # Input tensors
     input_ptr,      # [seq_len, hidden_dim]
     norm_weight_ptr,  # [hidden_dim]
     qkv_weight_ptr,   # [qkv_dim, hidden_dim]
-    qkv_bias_ptr,     # [qkv_dim] - bias parameter
     # Output tensor
     output_ptr,     # [seq_len, qkv_dim]
     # Dimensions
@@ -31,8 +30,6 @@ def fused_rmsnorm_qkv_mixed_precision_kernel(
     qkv_stride_in,
     output_stride_seq,
     output_stride_qkv,
-    # Flags
-    has_bias: tl.constexpr,  # Whether bias is present
     # Hyperparameters
     eps: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -40,12 +37,10 @@ def fused_rmsnorm_qkv_mixed_precision_kernel(
     BLOCK_SIZE_K: tl.constexpr,
 ):
     """
-    Fused RMSNorm + QKV kernel with mixed precision.
+    Fused RMSNorm + QKV kernel with PyTorch-compatible precision handling.
     
-    Key numerical behavior:
-    1. Compute variance in float32
-    2. Apply normalization in input dtype (bfloat16)
-    3. QKV projection in input dtype
+    Key design choice: Convert to bfloat16 after normalization but before matmul,
+    exactly matching PyTorch's behavior to avoid numerical differences with extreme weights.
     """
     pid_m = tl.program_id(0)  # Sequence dimension
     pid_n = tl.program_id(1)  # QKV output dimension
@@ -54,35 +49,34 @@ def fused_rmsnorm_qkv_mixed_precision_kernel(
     row_idx = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     row_mask = row_idx < seq_len
     
-    # Step 1: Compute RMSNorm with float32 variance ONLY
+    # Step 1: Compute RMSNorm with float32 accumulator for variance
     acc_var = tl.zeros([BLOCK_SIZE_M], dtype=tl.float32)
     
-    # Loop over hidden dimension to compute variance
+    # Loop over hidden dimension in chunks
     for k in range(0, hidden_dim, BLOCK_SIZE_K):
         col_idx = k + tl.arange(0, BLOCK_SIZE_K)
         col_mask = col_idx < hidden_dim
         mask = row_mask[:, None] & col_mask[None, :]
         
-        # Load input block
+        # Load input block - keep in original dtype
         input_block = tl.load(
             input_ptr + row_idx[:, None] * input_stride_seq + col_idx[None, :] * input_stride_hidden,
             mask=mask,
             other=0.0
         )
         
-        # Convert to float32 ONLY for variance accumulation
+        # Convert to float32 only for variance accumulation
         input_f32 = input_block.to(tl.float32)
         acc_var += tl.sum(input_f32 * input_f32, axis=1)
     
-    # Compute RMS in float32
-    rms_f32 = tl.sqrt(acc_var / hidden_dim + eps)
+    # Compute RMS with float32 precision
+    rms = tl.sqrt(acc_var / hidden_dim + eps)
     
-    # Step 2: Apply normalization and compute QKV projection
+    # Step 2: Compute normalized input @ qkv_weight.T
     col_idx = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     col_mask = col_idx < qkv_dim
     
-    # Initialize output accumulator in float32 (required by tl.dot)
-    # We'll convert to bfloat16 when storing
+    # Initialize output accumulator in float32 (tl.dot returns float32)
     acc_out = tl.zeros([BLOCK_SIZE_M, BLOCK_SIZE_N], dtype=tl.float32)
     
     # Tiled matrix multiplication loop
@@ -104,14 +98,12 @@ def fused_rmsnorm_qkv_mixed_precision_kernel(
             other=0.0
         )
         
-        # Apply RMSNorm: match PyTorch's exact behavior
-        # Normalize AND apply weight in float32, then convert to bfloat16
-        input_f32 = input_tile.to(tl.float32)
-        norm_weight_f32 = norm_weight_tile.to(tl.float32)
-        normalized_f32 = (input_f32 / rms_f32[:, None]) * norm_weight_f32[None, :]
+        # Apply RMSNorm: (input / rms) * norm_weight
+        # Do normalization in float32 for accuracy
+        normalized_f32 = input_tile.to(tl.float32) / rms[:, None] * norm_weight_tile.to(tl.float32)[None, :]
         
-        # Convert to bfloat16 AFTER normalization+weight (matching PyTorch)
-        normalized = normalized_f32.to(tl.bfloat16)
+        # CRITICAL: Convert to bfloat16 here to match PyTorch
+        normalized_tile = normalized_f32.to(tl.bfloat16)
         
         # Load weight tile
         weight_tile = tl.load(
@@ -121,55 +113,37 @@ def fused_rmsnorm_qkv_mixed_precision_kernel(
         )
         
         # Matrix multiply in bfloat16 (matching PyTorch)
+        # Ensure weight is also in bfloat16
         weight_bf16 = weight_tile.to(tl.bfloat16)
-        acc_out += tl.dot(normalized, weight_bf16.trans())
+        acc_out += tl.dot(normalized_tile, weight_bf16.trans())
     
-    # Step 3: Add bias if present
-    if has_bias:
-        bias_tile = tl.load(
-            qkv_bias_ptr + col_idx,
-            mask=col_mask,
-            other=0.0
-        )
-        # Add bias in float32 before converting to bfloat16
-        acc_out += bias_tile[None, :].to(tl.float32)
-    
-    # Convert to input dtype before storing (matching standard path)
-    acc_out_bf16 = acc_out.to(tl.bfloat16)
-    
-    # Store output in input dtype
+    # Store output - convert to bfloat16 to match PyTorch
     output_mask = row_mask[:, None] & col_mask[None, :]
     tl.store(
         output_ptr + row_idx[:, None] * output_stride_seq + col_idx[None, :] * output_stride_qkv,
-        acc_out_bf16,
+        acc_out.to(tl.bfloat16),
         mask=output_mask
     )
 
 
-class FusedRMSNormQKVMixedPrecision:
-    """Fused RMSNorm + QKV with mixed precision matching standard path."""
+class FusedRMSNormQKV:
+    """Fused RMSNorm + QKV with PyTorch-compatible precision handling."""
     
     @staticmethod
     def forward(
         input: torch.Tensor,      # [batch_seq_len, hidden_dim]
         norm_weight: torch.Tensor,  # [hidden_dim]
         qkv_weight: torch.Tensor,   # [qkv_dim, hidden_dim]
-        qkv_bias: Optional[torch.Tensor],  # [qkv_dim] or None
         num_q_heads: int,
         num_kv_heads: int,
         eps: float = 1e-6,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Compute fused RMSNorm + QKV projection with mixed precision.
-        
-        This matches the standard PyTorch path:
-        - Variance computed in float32
-        - Normalization applied in input dtype
-        - QKV projection in input dtype
+        Compute fused RMSNorm + QKV projection with PyTorch-compatible precision.
         
         Returns:
             q: [batch_seq_len, num_q_heads, head_dim]
-            k: [batch_seq_len, num_kv_heads, head_dim] 
+            k: [batch_seq_len, num_kv_heads, head_dim]
             v: [batch_seq_len, num_kv_heads, head_dim]
         """
         batch_seq_len, hidden_dim = input.shape
@@ -182,13 +156,11 @@ class FusedRMSNormQKVMixedPrecision:
         input = input.contiguous()
         norm_weight = norm_weight.contiguous()
         qkv_weight = qkv_weight.contiguous()
-        if qkv_bias is not None:
-            qkv_bias = qkv_bias.contiguous()
         
-        # Allocate output in INPUT dtype (not float32!)
+        # Allocate output in bfloat16 to match PyTorch
         output = torch.empty(
             (batch_seq_len, qkv_dim),
-            dtype=input.dtype,  # Match input dtype
+            dtype=torch.bfloat16,
             device=input.device
         )
         
@@ -204,12 +176,11 @@ class FusedRMSNormQKVMixedPrecision:
         )
         
         # Launch kernel
-        fused_rmsnorm_qkv_mixed_precision_kernel[grid](
+        fused_rmsnorm_qkv_pytorch_compat_kernel[grid](
             # Pointers
             input,
             norm_weight,
             qkv_weight,
-            qkv_bias if qkv_bias is not None else input,  # Dummy pointer if no bias
             output,
             # Dimensions
             batch_seq_len,
@@ -222,13 +193,11 @@ class FusedRMSNormQKVMixedPrecision:
             qkv_weight.stride(1),
             output.stride(0),
             output.stride(1),
-            # Flags
-            has_bias=qkv_bias is not None,
             # Hyperparameters
-            eps=eps,
-            BLOCK_SIZE_M=BLOCK_SIZE_M,
-            BLOCK_SIZE_N=BLOCK_SIZE_N,
-            BLOCK_SIZE_K=BLOCK_SIZE_K,
+            eps,
+            BLOCK_SIZE_M,
+            BLOCK_SIZE_N,
+            BLOCK_SIZE_K,
         )
         
         # Split QKV
@@ -238,7 +207,7 @@ class FusedRMSNormQKVMixedPrecision:
         
         q, k, v = output.split([q_dim, k_dim, v_dim], dim=-1)
         
-        # Reshape to head format
+        # Reshape
         q = q.view(batch_seq_len, num_q_heads, head_dim)
         k = k.view(batch_seq_len, num_kv_heads, head_dim)
         v = v.view(batch_seq_len, num_kv_heads, head_dim)

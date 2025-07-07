@@ -109,28 +109,32 @@ def fused_rmsnorm_qkv_kernel(
             other=0.0
         ).to(tl.float32)
         
-        # Normalize: (input / rms) * norm_weight
-        normalized_tile = (input_tile / rms[:, None]) * norm_weight_tile[None, :]
+        # Normalize: (input / rms) * norm_weight in float32
+        normalized_f32 = (input_tile / rms[:, None]) * norm_weight_tile[None, :]
+        
+        # CRITICAL: Convert to bfloat16 here to match PyTorch behavior
+        normalized_tile = normalized_f32.to(tl.bfloat16)
         
         # Load weight tile [N, K]
         weight_tile = tl.load(
             qkv_weight_ptr + col_idx[:, None] * qkv_stride_out + k_idx[None, :] * qkv_stride_in,
             mask=col_mask[:, None] & k_mask[None, :],
             other=0.0
-        ).to(tl.float32)
+        )
         
-        # Accumulate using tl.dot
+        # Ensure weight is in bfloat16 for matmul
+        weight_bf16 = weight_tile.to(tl.bfloat16)
+        
+        # Accumulate using tl.dot in bfloat16 (matching PyTorch)
         # normalized_tile is [M, K], weight_tile.T is [K, N]
-        # We need weight_tile to be transposed for the multiplication
-        # IMPORTANT: Keep computation in float32 for numerical stability with extreme norm weights
-        acc_out += tl.dot(normalized_tile, weight_tile.trans())
+        acc_out += tl.dot(normalized_tile, weight_bf16.trans())
     
     # Store output
     output_mask = row_mask[:, None] & col_mask[None, :]
-    # Store as float32 for numerical stability
+    # Convert to bfloat16 for output (matching PyTorch)
     tl.store(
         output_ptr + row_idx[:, None] * output_stride_seq + col_idx[None, :] * output_stride_qkv,
-        acc_out,
+        acc_out.to(tl.bfloat16),
         mask=output_mask
     )
 
@@ -166,11 +170,10 @@ class FusedRMSNormQKV:
         norm_weight = norm_weight.contiguous()
         qkv_weight = qkv_weight.contiguous()
         
-        # Allocate output - use float32 for numerical stability
-        # The extreme K normalization weights require higher precision
+        # Allocate output in bfloat16 to match PyTorch behavior
         output = torch.empty(
             (batch_seq_len, qkv_dim),
-            dtype=torch.float32,
+            dtype=torch.bfloat16,
             device=input.device
         )
         
