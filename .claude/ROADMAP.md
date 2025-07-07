@@ -115,7 +115,20 @@ Solution: Implemented automatic detection system that warns users and falls back
 - **Automatic Fallback**: Models incompatible with fused kernels use standard kernels
 - **Documentation**: User guide and technical analysis of compatibility criteria
 
-## Next Sprint Options (After Demos Update)
+## Current Sprint: Find Compatible Models for Fused Kernels
+
+### Sprint Goal
+Systematically test alternative models (TinyLlama and ERNIE) to find ones that work well with fused kernels.
+
+### Tasks
+- [ ] Implement LLaMA model support for TinyLlama-1.1B
+- [ ] Implement ERNIE model support for ERNIE-4.5-0.3B
+- [ ] Run compatibility analysis on both models
+- [ ] Compare weight distributions with Qwen3
+- [ ] Benchmark performance with/without fused kernels
+- [ ] Create model comparison report
+
+## Next Sprint Options
 
 ### Option 1: Quantization (Most Promising)
 - [ ] INT8/INT4 quantization with bitsandbytes or GPTQ
