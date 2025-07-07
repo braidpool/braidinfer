@@ -83,26 +83,31 @@
     - [x] Achieved perfect numerical match with PyTorch (0.000000 difference)
     - [x] Tested with extreme K normalization weights (96.5x)
     - [x] Updated QWEN3_NUMERICAL_STABILITY_GUIDE.md with findings
+- [x] Debug Qwen3 Attention Mechanism Sprint:
+    - [x] Analyzed chat template and special token handling
+    - [x] Traced token generation - found repetitive patterns
+    - [x] Tested attention computation in isolation - works correctly
+    - [x] Identified root cause: attention/KV cache integration issue
+    - [x] Created ATTENTION_MECHANISM_ISSUE.md documentation
+    - [x] Confirmed kernels are correct, integration is broken
 
-## Current Status: Kernel Precision Fixed ✅
-- **Kernel Accuracy**: Perfect match with PyTorch (0.000000 difference)
-- **Numerical Stability**: Stable even with 96.5x K normalization weights
-- **Root Cause Fixed**: BFloat16 conversion now matches PyTorch exactly
-- **Remaining Issue**: chat.py still produces gibberish (issue is elsewhere)
+## Current Status: Custom Kernels Integration Issue ⚠️
+- **Kernel Accuracy**: Perfect match with PyTorch (0.000000 difference) ✅
+- **Kernel Performance**: 12.72x speedup in isolation ✅
+- **Generation Issue**: Produces gibberish due to attention/KV cache integration ❌
+- **Root Cause**: Attention module expects InferenceContext, fails without proper setup
 
-## Key Finding: BFloat16 Conversion Point Critical
+## Key Findings
 
-The investigation revealed that the exact point where float32 is converted to bfloat16 is critical for numerical stability. PyTorch converts after normalization but before matrix multiplication, while the original kernels converted after everything. This small difference (0.0078) gets amplified 96x by Qwen3's extreme weights, causing gibberish output. The kernels are now fixed to match PyTorch's conversion behavior exactly.
+### Attention Mechanism Integration Issue
+The custom kernels work perfectly in isolation but fail during generation because:
+- The fused path still uses the standard attention module
+- The attention module requires proper InferenceContext with page_manager
+- Without correct KV cache handling, attention produces garbage outputs
+- Different prompts produce different repetitive patterns (context, email, nal)
 
-## Demos and Examples Update Sprint (Completed)
-- [x] Audit cli.py - fix system prompt not being seen by LLM
-- [x] Update chat.py to use ChunkedLLM with context reuse
-- [x] Add <think> tag filtering to chat.py
-- [x] Implement conversation chunk construction in chat.py
-- [x] Audit all examples in examples/ directory
-- [x] Ensure all demos properly showcase the project's capabilities
-
-## Key Discoveries
+### BFloat16 Conversion Point Critical
+The kernels now match PyTorch exactly by converting to bfloat16 at the correct point in the computation pipeline.
 
 ### Qwen3-0.6B Incompatible with Fused Kernels
 After extensive investigation, we discovered that Qwen3-0.6B cannot use fused kernels due to:
@@ -119,22 +124,23 @@ After extensive investigation, we discovered that Qwen3-0.6B cannot use fused ke
 
 ## Next Sprint Options
 
-### Option 1: Debug Chat Generation Issue (High Priority)
-- [ ] Investigate why chat.py produces gibberish despite correct kernels
-- [ ] Debug the LLM generation wrapper
-- [ ] Check model weight loading
-- [ ] Test with different models
+### Option 1: Fix Attention Integration (High Priority)
+- [ ] Debug InferenceContext passing in custom kernel path
+- [ ] Fix KV cache handling for Qwen3AttentionFused
+- [ ] Ensure proper sequence tracking
+- [ ] Test with working models (TinyLlama)
 
-### Option 2: Quantization (Most Promising for Performance)
+### Option 2: Implement Custom Attention
+- [ ] Create custom attention implementation that doesn't require InferenceContext
+- [ ] Handle KV cache directly in custom code
+- [ ] Bypass the problematic standard attention module
+- [ ] Integrate with FlashInfer properly
+
+### Option 3: Quantization (Most Promising for Performance)
 - [ ] INT8/INT4 quantization with bitsandbytes or GPTQ
 - [ ] Expected: 2-4x speedup (60-120 tok/s)
 - [ ] Maintain model quality with proper calibration
 - [ ] Easy integration with existing code
-
-### Option 3: Performance Benchmarking
-- [ ] Benchmark the fixed kernels vs standard implementation
-- [ ] Profile memory usage and speed improvements
-- [ ] Create comprehensive performance report
 
 ## Future Sprints
 
