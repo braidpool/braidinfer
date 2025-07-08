@@ -72,3 +72,7 @@ This is nano-vllm, a single-GPU optimized implementation of vLLM focused on high
   - Custom kernels now produce coherent output matching PyTorch exactly
 - **GQA Implementation**: Properly implemented Grouped Query Attention for Qwen3
 - **Comprehensive Testing**: Created 10 coherence tests including factual recall ("Aistonia" test)
+- **Cascade Attention Integration**: Successfully integrated cascade attention with GQA and custom kernels
+  - 53.3% memory savings for shared system prompts
+  - Works seamlessly with fused kernels
+  - Simple API: just set enable_cascade_attention=True

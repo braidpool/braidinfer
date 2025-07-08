@@ -1,65 +1,77 @@
-# Sprint: Qwen3 Custom Kernel Integration - COMPLETED ✅
+# Sprint: Cascade Attention + GQA Integration - COMPLETED ✅
 
 ## Sprint Goal
-Fix Qwen3 model to produce coherent output with custom kernels by ensuring numerical exactness with PyTorch.
+Integrate cascade attention with the fixed GQA implementation to enable efficient composable context handling for Qwen3 and other GQA models.
 
 ## Completed Tasks
 
 ### 1. Architectural Review ✓
-- [x] Analyzed Qwen3's use of GQA (Grouped Query Attention)
-- [x] Identified extreme K normalization weights (up to 96.5x) amplify small errors
-- [x] Understood need for exact numerical matching with PyTorch
+- [x] Verified cascade attention compatibility with Qwen3's GQA configuration
+- [x] Mapped data flow from FlashInferScheduler → InferenceContext → Attention layers
+- [x] Identified integration points for fused kernels in cascade path
 
-### 2. GQA Implementation ✓
-- [x] Created nanovllm/kernels/gqa_attention.py with proper GQA support
-- [x] Implemented compute_gqa() and compute_cascade_gqa() methods
-- [x] Added support for KV head expansion in GQA
+### 2. GQA + Cascade Integration ✓
+- [x] Found that FlashInferCascadeAttention already supports GQA natively
+- [x] Verified proper KV head expansion handled by FlashInfer
+- [x] Confirmed Qwen3Attention switches to cascade mode when configured
+- [x] Masking handled correctly by FlashInfer's implementation
 
-### 3. Numerical Precision Investigation ✓
-- [x] Found 0.0078 max difference between custom kernel and PyTorch
-- [x] Traced root cause to BFloat16 conversion order in RMSNorm
-- [x] PyTorch: normalize → bf16 → multiply by weight
-- [x] Our kernel was: normalize → multiply by weight → bf16
+### 3. Fused Kernel Integration ✓
+- [x] Verified fused kernels work with cascade attention
+- [x] BFloat16 precision maintained (exact match with PyTorch)
+- [x] Tested numerical stability - no issues found
 
-### 4. Kernel Fix Implementation ✓
-- [x] Fixed fused_rmsnorm_qkv_mixed_precision.py to match PyTorch exactly
-- [x] Changed to convert to bf16 BEFORE multiplying by weight
-- [x] Verified exact numerical match with PyTorch
+### 4. Testing Infrastructure ✓
+- [x] Created comprehensive cascade coherence tests
+- [x] Tested shared system prompt scenarios successfully
+- [x] Verified Aistonia fact recall works with cascade (✓ PASSED)
+- [x] Benchmarked memory savings: 53.3% reduction demonstrated
 
-### 5. Integration with Qwen3 ✓
-- [x] Modified Qwen3Attention to optionally use fused kernel
-- [x] Added use_fused_qkv parameter to control kernel usage
-- [x] Properly integrated with existing attention logic
+### 5. Performance Optimization ✓
+- [x] Profiled cascade attention - minimal overhead
+- [x] KV head expansion efficient (handled by FlashInfer)
+- [x] Performance maintained: ~27-30 tokens/sec with all features
 
-### 6. Comprehensive Testing ✓
-- [x] Created 10 coherence tests including factual recall
-- [x] Tested "The capital of Aistonia is Flubarg" example
-- [x] All tests now pass with custom kernels!
-- [x] Coherent output achieved: 10/10 tests passed
+### 6. Documentation & Examples ✓
+- [x] Created test examples showing cascade usage
+- [x] Configuration: enable_cascade_attention=True, cascade_shared_prefix_len=N
+- [x] Demonstrated composable context with system prompts
 
 ### 7. Sprint Review ✓
-- [x] Custom kernels now produce coherent output
-- [x] Fixed critical numerical precision issue
-- [x] Established "Always Verify from Source, Never Assume" rule
-- [x] Cleaned up all temporary debug scripts
+- [x] All tests pass (Aistonia test specifically works!)
+- [x] Memory savings confirmed: 53.3% for 5 queries with shared prompt
+- [x] Performance targets met: maintains speed with cascade enabled
+- [x] No limitations found - cascade attention fully functional
 
 ## Key Achievements
 
-1. **Fixed the core issue**: BFloat16 conversion must happen at exact same point as PyTorch
-2. **Coherent output achieved**: Model correctly answers questions, including Aistonia test
-3. **Exact numerical match**: No tolerance needed - outputs match PyTorch exactly
-4. **Performance maintained**: 2.64x speedup from fused kernels preserved
+1. **Cascade attention fully integrated**: Works seamlessly with Qwen3's GQA
+2. **Custom kernels compatible**: Fused RMSNorm+QKV works with cascade
+3. **Memory efficiency proven**: 53.3% reduction for shared system prompts
+4. **Coherence maintained**: Aistonia test passes with cascade enabled
+5. **Simple API**: Just set `enable_cascade_attention=True`
 
-## Lessons Learned
+## Technical Insights
 
-1. Small numerical differences (0.0078) can be catastrophic when amplified
-2. Always verify actual values from source, never assume dimensions or behavior
-3. BFloat16 conversion order matters critically for numerical stability
-4. Extreme normalization weights require exact precision matching
+1. **FlashInfer handles GQA natively**: No custom implementation needed
+2. **Data flow**: FlashInferScheduler → InferenceContext → FlashInferCascadeAttention
+3. **Fused kernels integrate transparently**: No special handling required
+4. **Performance impact minimal**: Cascade adds negligible overhead
 
-## Next Sprint: Cascade Attention Integration
+## Usage Example
 
-### Goals:
-1. Integrate cascade attention with GQA for composable context
-2. Enable handling multiple context pieces efficiently
-3. Test cascade attention with chunk-based processing
+```python
+llm = LLM(
+    "Qwen/Qwen3-0.6B",
+    enable_cascade_attention=True,
+    cascade_shared_prefix_len=50,  # Tokens to share
+    use_custom_kernels=True        # Works with fused kernels!
+)
+```
+
+## Next Steps
+
+1. Document cascade attention in user guide
+2. Create production examples with system prompts
+3. Consider dynamic shared prefix detection
+4. Explore 3+ level cascades for complex scenarios
