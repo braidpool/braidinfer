@@ -84,8 +84,21 @@ class Scheduler:
 
     def postprocess(self, seqs: list[Sequence], token_ids: list[int]) -> list[bool]:
         for seq, token_id in zip(seqs, token_ids):
-            seq.append_token(token_id)
-            if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
+            # Check if this token is a stop token BEFORE appending
+            is_stop_token = (
+                (not seq.ignore_eos and token_id == self.eos) or
+                (token_id in seq.stop_token_ids)
+            )
+            
+            # Only append the token if it's not a stop token
+            # This prevents stop tokens from appearing in the output
+            if not is_stop_token:
+                seq.append_token(token_id)
+            
+            # Check if we should stop (including max tokens)
+            should_stop = is_stop_token or (seq.num_completion_tokens == seq.max_tokens)
+            
+            if should_stop:
                 seq.status = SequenceStatus.FINISHED
                 self.page_manager.deallocate(seq)
                 self.running.remove(seq)

@@ -48,7 +48,24 @@ class LLMEngine:
         
         # Load tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True, trust_remote_code=True)
-        config.eos = self.tokenizer.eos_token_id
+        
+        # Set token IDs from model config first, then tokenizer as fallback
+        # Use model config as the authoritative source
+        if hasattr(config.hf_config, 'eos_token_id'):
+            config.eos = config.hf_config.eos_token_id
+        else:
+            config.eos = self.tokenizer.eos_token_id
+            
+        if hasattr(config.hf_config, 'bos_token_id'):
+            config.bos = config.hf_config.bos_token_id
+        else:
+            config.bos = self.tokenizer.bos_token_id if self.tokenizer.bos_token_id is not None else -1
+        
+        # Verify tokenizer matches model config
+        if self.tokenizer.eos_token_id != config.eos:
+            print(f"Note: Setting EOS to model config value {config.eos} (tokenizer had {self.tokenizer.eos_token_id})")
+        if self.tokenizer.bos_token_id != config.bos and config.bos != -1:
+            print(f"Note: Setting BOS to model config value {config.bos} (tokenizer had {self.tokenizer.bos_token_id})")
         
         # Initialize scheduler
         if getattr(config, 'enable_cascade_attention', False):
@@ -106,6 +123,23 @@ class LLMEngine:
         """Add a new request to the scheduler."""
         if isinstance(prompt, str):
             prompt = self.tokenizer.encode(prompt)
+        
+        # Process stop sequences if provided
+        if sampling_params.stop is not None:
+            if sampling_params.stop_token_ids is None:
+                sampling_params.stop_token_ids = []
+            
+            # Convert stop sequences to token IDs
+            stop_sequences = sampling_params.stop if isinstance(sampling_params.stop, list) else [sampling_params.stop]
+            for stop_seq in stop_sequences:
+                # Tokenize without special tokens to get the exact sequence
+                tokens = self.tokenizer.encode(stop_seq, add_special_tokens=False)
+                if len(tokens) == 1:
+                    # Single token stop sequence
+                    if tokens[0] not in sampling_params.stop_token_ids:
+                        sampling_params.stop_token_ids.append(tokens[0])
+                # Note: Multi-token stop sequences would need more complex handling
+        
         seq = Sequence(prompt, sampling_params)
         self.scheduler.add(seq)
     

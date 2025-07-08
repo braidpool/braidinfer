@@ -1,77 +1,94 @@
-# Sprint: Cascade Attention + GQA Integration - COMPLETED ✅
+# Sprint: Output KV Cache Retention and Reuse
 
 ## Sprint Goal
-Integrate cascade attention with the fixed GQA implementation to enable efficient composable context handling for Qwen3 and other GQA models.
+Implement retention of output KV cache as cascade attention chunks that can be reused in subsequent generations, enabling efficient multi-turn conversations and chain-of-thought analysis.
 
-## Completed Tasks
+## Background
+Currently, output KV cache is immediately deallocated after generation completes. However, cascade attention already has all the necessary position handling to allow reusing output KV cache as context chunks. This would enable:
+- Reusing assistant responses in multi-turn conversations
+- Building on previous reasoning traces
+- Analyzing or refining previous outputs
+- Significant memory and compute savings
 
-### 1. Architectural Review ✓
-- [x] Verified cascade attention compatibility with Qwen3's GQA configuration
-- [x] Mapped data flow from FlashInferScheduler → InferenceContext → Attention layers
-- [x] Identified integration points for fused kernels in cascade path
+## Key Challenge
+Need to handle `<think>...</think>` blocks in outputs - either:
+1. Save only the KV cache after the think block ends
+2. Mask out the think block in the saved chunk
 
-### 2. GQA + Cascade Integration ✓
-- [x] Found that FlashInferCascadeAttention already supports GQA natively
-- [x] Verified proper KV head expansion handled by FlashInfer
-- [x] Confirmed Qwen3Attention switches to cascade mode when configured
-- [x] Masking handled correctly by FlashInfer's implementation
+## Tasks
 
-### 3. Fused Kernel Integration ✓
-- [x] Verified fused kernels work with cascade attention
-- [x] BFloat16 precision maintained (exact match with PyTorch)
-- [x] Tested numerical stability - no issues found
+### 1. Architectural Review
+- [ ] Analyze current KV cache deallocation flow in scheduler/page_manager
+- [ ] Map out changes needed to retain output KV cache
+- [ ] Determine best approach for think tag handling (save partial vs mask)
+- [ ] Review ChunkedLLM API for output chunk registration
 
-### 4. Testing Infrastructure ✓
-- [x] Created comprehensive cascade coherence tests
-- [x] Tested shared system prompt scenarios successfully
-- [x] Verified Aistonia fact recall works with cascade (✓ PASSED)
-- [x] Benchmarked memory savings: 53.3% reduction demonstrated
+### 2. Implement KV Cache Retention
+- [ ] Add `retain_output_cache` flag to SamplingParams
+- [ ] Modify scheduler.postprocess() to conditionally retain KV cache
+- [ ] Create mechanism to extract KV cache pages after generation
+- [ ] Implement position tracking for output chunks
 
-### 5. Performance Optimization ✓
-- [x] Profiled cascade attention - minimal overhead
-- [x] KV head expansion efficient (handled by FlashInfer)
-- [x] Performance maintained: ~27-30 tokens/sec with all features
+### 3. Think Tag Handling
+- [ ] Implement token position tracking during generation
+- [ ] Detect `<think>` and `</think>` token positions
+- [ ] Option A: Extract KV cache only from post-think positions
+- [ ] Option B: Implement masking mechanism for think blocks
+- [ ] Test both approaches and choose best one
 
-### 6. Documentation & Examples ✓
-- [x] Created test examples showing cascade usage
-- [x] Configuration: enable_cascade_attention=True, cascade_shared_prefix_len=N
-- [x] Demonstrated composable context with system prompts
+### 4. Output Chunk Registration
+- [ ] Add OUTPUT chunk type to ChunkType enum
+- [ ] Create method to register output KV cache as chunk
+- [ ] Ensure proper position offset tracking
+- [ ] Handle chunk metadata (generation params, timestamps)
 
-### 7. Sprint Review ✓
-- [x] All tests pass (Aistonia test specifically works!)
-- [x] Memory savings confirmed: 53.3% for 5 queries with shared prompt
-- [x] Performance targets met: maintains speed with cascade enabled
-- [x] No limitations found - cascade attention fully functional
+### 5. Manual Deallocation API
+- [ ] Add method to manually deallocate output chunks
+- [ ] Implement chunk expiration/eviction policies
+- [ ] Add CLI commands for output chunk management
+- [ ] Document memory implications
 
-## Key Achievements
+### 6. Integration with ChunkedLLM
+- [ ] Extend ChunkedLLM.generate() to return output chunk ID
+- [ ] Allow output chunks to be used as context chunks
+- [ ] Test cascade composition with output chunks
+- [ ] Verify position handling is correct
 
-1. **Cascade attention fully integrated**: Works seamlessly with Qwen3's GQA
-2. **Custom kernels compatible**: Fused RMSNorm+QKV works with cascade
-3. **Memory efficiency proven**: 53.3% reduction for shared system prompts
-4. **Coherence maintained**: Aistonia test passes with cascade enabled
-5. **Simple API**: Just set `enable_cascade_attention=True`
+### 7. Update Chat Interfaces
+- [ ] Modify chat.py to optionally retain assistant responses
+- [ ] Update cli.py to show and manage output chunks
+- [ ] Add commands to reuse previous outputs
+- [ ] Implement conversation memory management
 
-## Technical Insights
+### 8. Testing
+- [ ] Create tests for output KV cache retention
+- [ ] Test multi-turn conversations with reused outputs
+- [ ] Verify think tag removal/masking works correctly
+- [ ] Benchmark memory savings and performance impact
+- [ ] Test edge cases (max memory, many outputs)
 
-1. **FlashInfer handles GQA natively**: No custom implementation needed
-2. **Data flow**: FlashInferScheduler → InferenceContext → FlashInferCascadeAttention
-3. **Fused kernels integrate transparently**: No special handling required
-4. **Performance impact minimal**: Cascade adds negligible overhead
+### 9. Documentation
+- [ ] Document output chunk retention API
+- [ ] Create examples of multi-turn conversation optimization
+- [ ] Add memory management best practices
+- [ ] Update architecture docs with new flow
 
-## Usage Example
+### 10. Sprint Review
+- [ ] Verify all tests pass
+- [ ] Benchmark performance improvements
+- [ ] Review memory usage patterns
+- [ ] Document any limitations or issues
+- [ ] Create demo showcasing the feature
 
-```python
-llm = LLM(
-    "Qwen/Qwen3-0.6B",
-    enable_cascade_attention=True,
-    cascade_shared_prefix_len=50,  # Tokens to share
-    use_custom_kernels=True        # Works with fused kernels!
-)
-```
+## Success Criteria
+1. Output KV cache can be retained and reused in subsequent generations
+2. Think tags are properly handled (removed or masked)
+3. Memory savings demonstrated for multi-turn conversations
+4. No regression in generation quality or performance
+5. Clean API for managing output chunks
 
-## Next Steps
-
-1. Document cascade attention in user guide
-2. Create production examples with system prompts
-3. Consider dynamic shared prefix detection
-4. Explore 3+ level cascades for complex scenarios
+## Technical Notes
+- Leverage existing cascade attention position handling
+- Ensure compatibility with all attention mechanisms (standard, cascade, GQA)
+- Consider memory pressure and automatic eviction strategies
+- Think about future extensions (e.g., persistent cache across sessions)

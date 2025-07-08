@@ -13,6 +13,7 @@ class Config:
     enforce_eager: bool = False
     hf_config: AutoConfig | None = None
     eos: int = -1
+    bos: int = -1  # Beginning of sequence token
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
     
