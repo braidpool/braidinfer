@@ -41,8 +41,17 @@
 - FlashInfer is the authoritative implementation for cascade attention
 - Must conform exactly to FlashInfer's API and expectations
 
+## Critical Implementation Issues
+
+### KV Cache Management System
+- User found that _prefill_chunk was never implemented: "You did not implement _prefill_chunk. Therefore none of this does what it claims to do."
+- Current ChunkedLLM is just a text management system, not KV cache management
+- User explicitly stated: "You were SUPPOSED to be building a KV cache management system"
+- Must implement actual KV cache reuse, not just text concatenation
+
 ## Priority Order
-1. Fix performance regression (23 tok/s → 200+ tok/s)
-2. Sprint review and cleanup
-3. Maintain proper testing practices
-4. Keep repository clean
+1. Fix KV cache management system - implement actual KV cache reuse
+2. Fix performance regression (23 tok/s → 200+ tok/s) 
+3. Sprint review and cleanup
+4. Maintain proper testing practices
+5. Keep repository clean
