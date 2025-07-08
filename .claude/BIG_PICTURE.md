@@ -61,6 +61,14 @@ This is nano-vllm, a single-GPU optimized implementation of vLLM focused on high
 1. Model warmup was removed during refactoring
 2. Some error handling and metrics code was removed
 3. GPT-2 weight loading has some issues with transformer. prefix
-4. Qwen3 models incompatible with fused kernels due to extreme K normalization weights (96.5x)
+4. ~~Qwen3 models incompatible with fused kernels due to extreme K normalization weights (96.5x)~~ **FIXED!**
 5. ERNIE-4.5 implementation produces gibberish (works with vanilla transformers)
 6. Chat template must be model-specific (fixed in chat.py)
+
+## Recent Breakthroughs
+- **Qwen3 Custom Kernels Fixed**: Discovered and fixed critical numerical precision issue
+  - Root cause: BFloat16 conversion must happen BEFORE weight multiplication in RMSNorm
+  - Small 0.0078 difference was amplified 96.5x by extreme K weights
+  - Custom kernels now produce coherent output matching PyTorch exactly
+- **GQA Implementation**: Properly implemented Grouped Query Attention for Qwen3
+- **Comprehensive Testing**: Created 10 coherence tests including factual recall ("Aistonia" test)

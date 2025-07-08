@@ -39,8 +39,11 @@ class Qwen3Attention(nn.Module):
         qkv_bias: bool = False,
         rope_theta: float = 10000.0,  # Standard default, should be overridden by config
         rope_scaling: tuple | None = None,
+        use_fused_qkv: bool = False,  # Use fused RMSNorm+QKV kernel
     ) -> None:
         super().__init__()
+        self.use_fused_qkv = use_fused_qkv
+        self.rms_norm_eps = rms_norm_eps
         self.layer_idx = layer_idx
         # Single GPU: no tensor parallelism
         self.total_num_heads = num_heads
@@ -99,15 +102,46 @@ class Qwen3Attention(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         context: 'InferenceContext' = None,
+        layernorm_weight: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        qkv = self.qkv_proj(hidden_states)
-        q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q_by_head = q.view(-1, self.num_heads, self.head_dim)
-        q_by_head = self.q_norm(q_by_head)
-        q = q_by_head.view(q.shape)
-        k_by_head = k.view(-1, self.num_kv_heads, self.head_dim)
-        k_by_head = self.k_norm(k_by_head)
-        k = k_by_head.view(k.shape)
+        if self.use_fused_qkv and layernorm_weight is not None:
+            # Use fused kernel
+            from nanovllm.kernels.fused_rmsnorm_qkv_mixed_precision import FusedRMSNormQKVMixedPrecision
+            
+            # Ensure 2D input
+            orig_shape = hidden_states.shape
+            if hidden_states.dim() == 3:
+                hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
+            
+            q, k, v = FusedRMSNormQKVMixedPrecision.forward(
+                hidden_states,
+                layernorm_weight,
+                self.qkv_proj.weight,
+                self.qkv_proj.bias if hasattr(self.qkv_proj, 'bias') and self.qkv_proj.bias is not None else None,
+                self.num_heads,
+                self.num_kv_heads,
+                eps=self.rms_norm_eps
+            )
+            
+            # Apply Q/K normalization
+            q = self.q_norm(q.float()).to(hidden_states.dtype)
+            k = self.k_norm(k.float()).to(hidden_states.dtype)
+            
+            # Flatten for rotary
+            batch_seq_len = q.shape[0]
+            q = q.view(batch_seq_len, -1)
+            k = k.view(batch_seq_len, -1)
+            v = v.view(batch_seq_len, -1)
+        else:
+            # Standard path
+            qkv = self.qkv_proj(hidden_states)
+            q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
+            q_by_head = q.view(-1, self.num_heads, self.head_dim)
+            q_by_head = self.q_norm(q_by_head)
+            q = q_by_head.view(q.shape)
+            k_by_head = k.view(-1, self.num_kv_heads, self.head_dim)
+            k_by_head = self.k_norm(k_by_head)
+            k = k_by_head.view(k.shape)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v, context)
         output = self.o_proj(attn_output)
@@ -192,6 +226,8 @@ class Qwen3AttentionFused(nn.Module):
                     self.layer_idx
                 )
             else:
+                # Use SimpleAttention as fallback for custom kernels
+                from nanovllm.layers.attention import Attention
                 self.attn = Attention(
                     self.num_heads,
                     self.head_dim,
@@ -447,6 +483,7 @@ class Qwen3DecoderLayer(nn.Module):
                 rope_theta=rope_theta,
                 rope_scaling=rope_scaling,
                 max_position=max_position_embeddings,
+                use_fused_qkv=use_custom_kernels,  # Use fused kernel when custom kernels enabled
             )
         self.mlp = Qwen3MLP(
             hidden_size=config.hidden_size,
@@ -463,14 +500,9 @@ class Qwen3DecoderLayer(nn.Module):
         residual = hidden_states
         
         if self.use_custom_kernels:
-            # Fused kernel expects unnormalized input and layernorm weight
-            # Check if we should use fused output projection
-            if hasattr(self.self_attn, 'use_fused_output'):
-                # Pass residual for fused output projection + add
-                hidden_states = self.self_attn(positions, hidden_states, context, residual, self.input_layernorm.weight)
-            else:
-                hidden_states = self.self_attn(positions, hidden_states, context, layernorm_weight=self.input_layernorm.weight)
-                hidden_states = residual + hidden_states
+            # Pass layernorm weight for fused kernel
+            hidden_states = self.self_attn(positions, hidden_states, context, layernorm_weight=self.input_layernorm.weight)
+            hidden_states = residual + hidden_states
         else:
             # Standard path with separate normalization
             hidden_states = self.input_layernorm(hidden_states)

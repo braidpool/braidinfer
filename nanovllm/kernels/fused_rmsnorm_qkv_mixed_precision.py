@@ -105,13 +105,15 @@ def fused_rmsnorm_qkv_mixed_precision_kernel(
         )
         
         # Apply RMSNorm: match PyTorch's exact behavior
-        # Normalize AND apply weight in float32, then convert to bfloat16
+        # Step 1: Normalize in float32
         input_f32 = input_tile.to(tl.float32)
-        norm_weight_f32 = norm_weight_tile.to(tl.float32)
-        normalized_f32 = (input_f32 / rms_f32[:, None]) * norm_weight_f32[None, :]
+        normalized_f32 = input_f32 / rms_f32[:, None]
         
-        # Convert to bfloat16 AFTER normalization+weight (matching PyTorch)
-        normalized = normalized_f32.to(tl.bfloat16)
+        # Step 2: Convert to bfloat16 BEFORE multiplying by weight (matching PyTorch)
+        normalized_bf16 = normalized_f32.to(tl.bfloat16)
+        
+        # Step 3: Multiply by weight in bfloat16
+        normalized = normalized_bf16 * norm_weight_tile
         
         # Load weight tile
         weight_tile = tl.load(

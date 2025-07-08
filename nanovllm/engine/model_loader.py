@@ -40,7 +40,7 @@ class ModelLoader:
             try:
                 model_type = hf_config.model_type
                 
-                if model_type == "qwen3":
+                if model_type in ["qwen3", "qwen2"]:
                     # Check if use_custom_kernels is specified in config
                     use_custom_kernels = getattr(config, 'use_custom_kernels', False)
                     model = Qwen3ForCausalLM(hf_config, use_custom_kernels=use_custom_kernels)
