@@ -2,6 +2,7 @@
 ChunkedLLM - Main API implementation for chunk-based inference.
 """
 
+import sys
 import time
 from typing import Dict, List, Optional, Any, Union
 import torch
@@ -211,7 +212,8 @@ class ChunkedLLM:
                            system_chunk_id: str,
                            query_chunk_id: str,
                            context_chunk_ids: Optional[List[str]] = None,
-                           sampling_params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+                           sampling_params: Optional[Dict[str, Any]] = None,
+                           stream: bool = False) -> Union[Dict[str, Any], Any]:
         """
         Generate output from specific chunks.
         
@@ -267,15 +269,21 @@ class ChunkedLLM:
             sp = SamplingParams(**sampling_params)
         
         # Generate
-        outputs = self.llm.generate([prompt], sp)
-        
-        if not outputs:
-            return {"text": "", "token_ids": []}
-        
-        return {
-            "text": outputs[0]["text"],
-            "token_ids": outputs[0].get("token_ids", [])
-        }
+        if stream:
+            # Streaming mode - properly yield from the generator
+            for output in self.llm.generate([prompt], sp, stream=True):
+                yield output
+        else:
+            # Non-streaming mode
+            outputs = self.llm.generate([prompt], sp)
+            
+            if not outputs:
+                return {"text": "", "token_ids": []}
+            
+            return {
+                "text": outputs[0]["text"],
+                "token_ids": outputs[0].get("token_ids", [])
+            }
     
     def batch_generate_from_chunks(self,
                                  requests: List[Dict[str, Any]],

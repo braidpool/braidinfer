@@ -18,10 +18,12 @@ This is nano-vllm, a single-GPU optimized implementation of vLLM focused on high
   - ✅ Achieved >100 tok/s stretch goal (actual: ~230 tok/s)
   - ✅ Created comprehensive test suite for kernel validation
   - ✅ Successfully integrated cascade attention with GQA and custom kernels
-- **Current Sprint**: Output KV Cache Retention
-  - Implementing retention of output KV cache as reusable cascade chunks
-  - Handling think tag removal/masking for clean context reuse
-  - Enabling efficient multi-turn conversations and chain-of-thought
+- **Completed Sprint**: Output KV Cache Retention ✅
+  - Implemented retention of output KV cache as reusable cascade chunks
+  - Handled think tag removal/masking for clean context reuse
+  - Enabled efficient multi-turn conversations and chain-of-thought
+  - Fixed streaming output to show think tags during generation
+  - Added CLI and chat interface support for output chunk management
 
 ## Core Components
 1. **LLMEngine**: Main engine orchestrating inference

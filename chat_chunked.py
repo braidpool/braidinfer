@@ -135,8 +135,11 @@ class ChunkedFastChat:
         first_token_time = None
         
         try:
-            # Generate with chunks
-            output = self.llm.generate_from_chunks(
+            # Generate with chunks and streaming
+            cumulative_text = ""
+            generated_text = ""
+            
+            for output in self.llm.generate_from_chunks(
                 system_chunk_id=self.system_chunk_id,
                 query_chunk_id=query_chunk_id,
                 context_chunk_ids=context_chunk_ids if context_chunk_ids else None,
@@ -144,17 +147,31 @@ class ChunkedFastChat:
                     "temperature": 0.7,
                     "max_tokens": 512,
                     "ignore_eos": False
-                }
-            )
-            
-            # For now, print the full output (no streaming with ChunkedLLM yet)
-            # Filter think tags before displaying
-            filtered_text = self._filter_think_tags(output['text'])
-            print(filtered_text)
+                },
+                stream=True
+            ):
+                if not output["finished"]:
+                    # Stream new text including think tags
+                    new_text = output["text"]
+                    print(new_text, end="", flush=True)
+                    cumulative_text = output.get("cumulative_text", "")
+                    
+                    # Track timing
+                    if first_token_time is None and len(new_text.strip()) > 0:
+                        first_token_time = time.time() - start_time
+                    
+                    if "token_ids" in output:
+                        token_count += len(output["token_ids"])
+                else:
+                    # Final output
+                    generated_text = output["final_output"]["text"]
+                    token_count = len(output["final_output"]["token_ids"])
             
             # Track timing
             total_time = time.time() - start_time
-            token_count = len(output.get('token_ids', []))
+            
+            # Filter think tags for conversation history
+            filtered_text = self._filter_think_tags(generated_text)
             
             # Register assistant response as a chunk for future context
             assistant_chunk_id = self.llm.register_chunk(
@@ -177,6 +194,8 @@ class ChunkedFastChat:
             self.total_tokens_generated += token_count
             
             print(f"\n[Generated {token_count} tokens in {total_time:.2f}s = {tokens_per_second:.1f} tok/s]")
+            if first_token_time:
+                print(f"[Time to first token: {first_token_time:.3f}s]")
         
         # Show chunk statistics
         stats_after = self.llm.get_chunk_stats()
