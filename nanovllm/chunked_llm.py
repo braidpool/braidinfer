@@ -260,7 +260,11 @@ class ChunkedLLM:
         if sampling_params is None:
             sampling_params = {}
         
-        sp = SamplingParams(**sampling_params)
+        # Handle both dict and SamplingParams object
+        if isinstance(sampling_params, SamplingParams):
+            sp = sampling_params
+        else:
+            sp = SamplingParams(**sampling_params)
         
         # Generate
         outputs = self.llm.generate([prompt], sp)
@@ -315,7 +319,11 @@ class ChunkedLLM:
         if sampling_params is None:
             sampling_params = {}
         
-        sp = SamplingParams(**sampling_params)
+        # Handle both dict and SamplingParams object
+        if isinstance(sampling_params, SamplingParams):
+            sp = sampling_params
+        else:
+            sp = SamplingParams(**sampling_params)
         
         # Batch generate
         outputs = self.llm.generate(prompts, sp)

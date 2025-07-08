@@ -22,7 +22,8 @@ from rich.align import Align
 from rich.rule import Rule
 from rich import box
 
-from nanovllm import ChunkedLLM, ChunkType, SamplingParams
+from nanovllm import ChunkedLLM, ChunkType
+from nanovllm.sampling_params import SamplingParams
 
 
 @dataclass
@@ -379,14 +380,32 @@ class CascadeCLI:
         try:
             start_time = time.time()
             
-            # Use generate_and_retain_output to keep the output KV cache
-            output = self.llm.generate_and_retain_output(
-                system_prompt=self.llm.get_chunk(self.state.system_chunk_id)['content'],
-                query=self.llm.get_chunk(self.state.query_chunk_id)['content'],
-                context=[self.llm.get_chunk(cid)['content'] for cid in self.state.context_chunk_ids] if self.state.context_chunk_ids else None,
-                sampling_params={"temperature": 0.7, "max_tokens": 512},
-                persist_chunks=False  # Don't persist the intermediate chunks
+            # Generate from existing chunks with output retention
+            sampling_params = {
+                "temperature": 0.7, 
+                "max_tokens": 512,
+                "retain_output_cache": True  # Enable output retention
+            }
+            
+            output = self.llm.generate_from_chunks(
+                system_chunk_id=self.state.system_chunk_id,
+                query_chunk_id=self.state.query_chunk_id,
+                context_chunk_ids=self.state.context_chunk_ids if self.state.context_chunk_ids else None,
+                sampling_params=sampling_params
             )
+            
+            # Register the output as a chunk if it was retained
+            if output.get('text'):
+                # Get the last retained sequence
+                retained_seqs = self.llm.llm.get_retained_sequences()
+                if retained_seqs:
+                    seq_id = max(retained_seqs.keys())
+                    output_chunk_id = self.llm.register_output_chunk_from_retained(
+                        seq_id=seq_id,
+                        metadata={"query": self.llm.get_chunk(self.state.query_chunk_id)['content']}
+                    )
+                    if output_chunk_id:
+                        output['output_chunk_id'] = output_chunk_id
             
             elapsed = time.time() - start_time
             
