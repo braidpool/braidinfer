@@ -3,7 +3,7 @@ Page manager for nano-vllm.
 Manages page allocation and tracks page tables for sequences.
 """
 
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Any
 import torch
 import flashinfer
 from collections import deque
@@ -210,3 +210,33 @@ class PageManager:
         else:
             for seq in sequences:
                 self.seq_lengths[seq.seq_id] += 1
+    
+    def get_sequence_cache_info(self, seq: Sequence) -> Optional[Dict[str, Any]]:
+        """Get KV cache information for a retained sequence.
+        
+        Returns:
+            Dictionary with cache info or None if sequence not found.
+        """
+        if seq.seq_id not in self.seq_page_tables:
+            return None
+        
+        return {
+            "seq_id": seq.seq_id,
+            "page_indices": self.seq_page_tables[seq.seq_id].copy(),
+            "length": self.seq_lengths.get(seq.seq_id, 0),
+            "num_pages": len(self.seq_page_tables[seq.seq_id]),
+            "page_size": self.page_size,
+            "num_layers": self.num_layers,
+            "num_kv_heads": self.num_kv_heads,
+            "head_dim": self.head_dim
+        }
+    
+    def deallocate_by_seq_id(self, seq_id: int):
+        """Deallocate pages for a sequence by ID (for manual cleanup)."""
+        if seq_id not in self.seq_page_tables:
+            return
+        
+        # Return pages to free pool
+        self.free_pages.extend(self.seq_page_tables[seq_id])
+        del self.seq_page_tables[seq_id]
+        del self.seq_lengths[seq_id]

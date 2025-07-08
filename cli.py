@@ -36,6 +36,9 @@ class CLIState:
     last_output: Optional[str] = None
     generation_time: float = 0.0
     tokens_generated: int = 0
+    
+    # Output chunks
+    output_chunk_ids: List[str] = field(default_factory=list)
 
 
 class CascadeCLI:
@@ -168,6 +171,21 @@ class CascadeCLI:
         else:
             table.add_row("Query", "[Not set]", "-", "-", "-")
         
+        # Add output chunks
+        if self.state.output_chunk_ids:
+            for i, output_id in enumerate(self.state.output_chunk_ids):
+                try:
+                    chunk = self.llm.get_chunk(output_id)
+                    table.add_row(
+                        f"Output {i+1}",
+                        chunk['content'][:40] + "..." if len(chunk['content']) > 40 else chunk['content'],
+                        str(chunk['token_count']),
+                        chunk['chunk_id'][:8] + "...",
+                        "Retained"
+                    )
+                except:
+                    table.add_row(f"Output {i+1}", "[Error loading chunk]", "?", "?", "Error")
+        
         return Panel(table, box=box.ROUNDED)
     
     def render_registry_stats(self) -> Panel:
@@ -233,6 +251,9 @@ class CascadeCLI:
 [yellow]/clear system|context|query[/yellow] - Clear specific type
 [yellow]/list[/yellow] - List all chunks in registry
 [yellow]/stats[/yellow] - Show detailed statistics
+[yellow]/output[/yellow] - List all output chunks
+[yellow]/use-output <n>[/yellow] - Add output chunk N as context
+[yellow]/delete-output <n>[/yellow] - Delete output chunk N
 [yellow]/help[/yellow] - Show this help
 [yellow]/exit[/yellow] or [yellow]/quit[/yellow] - Exit the CLI
 
@@ -240,6 +261,7 @@ class CascadeCLI:
 - Chunks are automatically deduplicated by content
 - System and query are required for inference
 - Context chunks are optional
+- Output chunks are retained after generation for reuse
 - Use the chunk-based API for efficient memory usage
         """
         self.console.print(help_text)
@@ -357,11 +379,13 @@ class CascadeCLI:
         try:
             start_time = time.time()
             
-            output = self.llm.generate_from_chunks(
-                system_chunk_id=self.state.system_chunk_id,
-                query_chunk_id=self.state.query_chunk_id,
-                context_chunk_ids=self.state.context_chunk_ids if self.state.context_chunk_ids else None,
-                sampling_params={"temperature": 0.7, "max_tokens": 512}
+            # Use generate_and_retain_output to keep the output KV cache
+            output = self.llm.generate_and_retain_output(
+                system_prompt=self.llm.get_chunk(self.state.system_chunk_id)['content'],
+                query=self.llm.get_chunk(self.state.query_chunk_id)['content'],
+                context=[self.llm.get_chunk(cid)['content'] for cid in self.state.context_chunk_ids] if self.state.context_chunk_ids else None,
+                sampling_params={"temperature": 0.7, "max_tokens": 512},
+                persist_chunks=False  # Don't persist the intermediate chunks
             )
             
             elapsed = time.time() - start_time
@@ -373,6 +397,10 @@ class CascadeCLI:
             self.state.last_output = filtered_output
             self.state.generation_time = elapsed
             self.state.tokens_generated = len(output.get('token_ids', []))
+            
+            # Add output chunk ID to our list if retained
+            if 'output_chunk_id' in output:
+                self.state.output_chunk_ids.append(output['output_chunk_id'])
             
             # Show output
             self.console.print("\n[bold green]Generation complete![/bold green]")
@@ -405,6 +433,65 @@ class CascadeCLI:
         table.add_row("Evictions", str(stats['evictions']))
         
         self.console.print(table)
+    
+    def handle_output_list(self):
+        """Handle /output command to list output chunks."""
+        if not self.state.output_chunk_ids:
+            self.console.print("[yellow]No output chunks available.[/yellow]")
+            return
+        
+        table = Table(title="Output Chunks", box=box.SIMPLE)
+        table.add_column("#", style="cyan", width=3)
+        table.add_column("Preview", width=50)
+        table.add_column("Tokens", justify="right")
+        table.add_column("ID", style="dim")
+        
+        for i, output_id in enumerate(self.state.output_chunk_ids):
+            try:
+                chunk = self.llm.get_chunk(output_id)
+                table.add_row(
+                    str(i + 1),
+                    chunk['content'][:50] + "..." if len(chunk['content']) > 50 else chunk['content'],
+                    str(chunk['token_count']),
+                    chunk['chunk_id'][:8] + "..."
+                )
+            except:
+                table.add_row(str(i + 1), "[Error loading chunk]", "?", "?")
+        
+        self.console.print(table)
+    
+    def handle_use_output(self, args: str):
+        """Handle /use-output command to add output chunk as context."""
+        try:
+            output_num = int(args.strip()) - 1
+            if output_num < 0 or output_num >= len(self.state.output_chunk_ids):
+                self.console.print(f"[red]Invalid output number. Choose 1-{len(self.state.output_chunk_ids)}[/red]")
+                return
+            
+            output_id = self.state.output_chunk_ids[output_num]
+            self.state.context_chunk_ids.append(output_id)
+            self.console.print(f"[green]Output {output_num + 1} added as context.[/green]")
+        except ValueError:
+            self.console.print("[red]Please provide a valid output number.[/red]")
+    
+    def handle_delete_output(self, args: str):
+        """Handle /delete-output command to delete an output chunk."""
+        try:
+            output_num = int(args.strip()) - 1
+            if output_num < 0 or output_num >= len(self.state.output_chunk_ids):
+                self.console.print(f"[red]Invalid output number. Choose 1-{len(self.state.output_chunk_ids)}[/red]")
+                return
+            
+            output_id = self.state.output_chunk_ids[output_num]
+            
+            # Delete the chunk (this will also release its KV cache)
+            if self.llm.delete_chunk(output_id):
+                self.state.output_chunk_ids.pop(output_num)
+                self.console.print(f"[green]Output {output_num + 1} deleted.[/green]")
+            else:
+                self.console.print("[red]Failed to delete output chunk.[/red]")
+        except ValueError:
+            self.console.print("[red]Please provide a valid output number.[/red]")
     
     def run(self):
         """Run the interactive CLI."""
@@ -456,6 +543,15 @@ class CascadeCLI:
                     elif command == '/stats':
                         self.show_stats()
                         Prompt.ask("\n[dim]Press Enter to continue[/dim]")
+                    elif command == '/output':
+                        self.handle_output_list()
+                        Prompt.ask("\n[dim]Press Enter to continue[/dim]")
+                    elif command == '/use-output':
+                        self.handle_use_output(args)
+                        time.sleep(0.5)
+                    elif command == '/delete-output':
+                        self.handle_delete_output(args)
+                        time.sleep(0.5)
                     else:
                         self.console.print(f"[red]Unknown command: {command}[/red]")
                         time.sleep(1)

@@ -246,9 +246,10 @@ class ChunkedLLM:
         if context_chunk_ids:
             for ctx_id in context_chunk_ids:
                 ctx_chunk = self.registry.get(ctx_id)
-                if ctx_chunk.chunk_type != ChunkType.CONTEXT:
+                # Allow OUTPUT chunks to be used as context
+                if ctx_chunk.chunk_type not in (ChunkType.CONTEXT, ChunkType.OUTPUT):
                     raise InvalidCompositionError(
-                        f"Chunk {ctx_id} is not a context chunk"
+                        f"Chunk {ctx_id} is not a context or output chunk"
                     )
                 context_chunks.append(ctx_chunk)
         
@@ -298,7 +299,13 @@ class ChunkedLLM:
             context_chunks = []
             if "context_chunk_ids" in request and request["context_chunk_ids"]:
                 for ctx_id in request["context_chunk_ids"]:
-                    context_chunks.append(self.registry.get(ctx_id))
+                    ctx_chunk = self.registry.get(ctx_id)
+                    # Validate chunk type
+                    if ctx_chunk.chunk_type not in (ChunkType.CONTEXT, ChunkType.OUTPUT):
+                        raise InvalidCompositionError(
+                            f"Chunk {ctx_id} is not a context or output chunk"
+                        )
+                    context_chunks.append(ctx_chunk)
             
             # Build prompt
             prompt = self._build_prompt(system_chunk, context_chunks, query_chunk)
@@ -577,7 +584,101 @@ class ChunkedLLM:
         """
         if chunk_type == ChunkType.SYSTEM_PROMPT:
             return 0
-        elif chunk_type == ChunkType.CONTEXT:
+        elif chunk_type in (ChunkType.CONTEXT, ChunkType.OUTPUT):
             return 1
         else:  # QUERY
             return 2
+    
+    def register_output_chunk_from_retained(self, 
+                                          seq_id: int, 
+                                          metadata: Optional[Dict[str, Any]] = None) -> Optional[str]:
+        """
+        Register an output chunk from a retained sequence's KV cache.
+        
+        Args:
+            seq_id: Sequence ID of the retained output
+            metadata: Optional metadata for the chunk
+            
+        Returns:
+            chunk_id if successful, None if sequence not found
+        """
+        # Get retained sequence info from the LLM engine
+        retained_info = self.llm.get_retained_sequences().get(seq_id)
+        if not retained_info:
+            return None
+        
+        # Extract the text - note this already has think tags filtered
+        content = retained_info["text"]
+        
+        # Create metadata
+        chunk_metadata = metadata or {}
+        chunk_metadata.update({
+            "source": "output",
+            "seq_id": seq_id,
+            "prompt_length": retained_info["prompt_length"],
+            "completion_length": retained_info["completion_length"],
+            "has_think_tags": retained_info["think_positions"] is not None
+        })
+        
+        # Register as OUTPUT chunk
+        chunk_id = self.register_chunk(
+            content=content,
+            chunk_type=ChunkType.OUTPUT,
+            metadata=chunk_metadata
+        )
+        
+        # Store the KV cache info with the chunk
+        chunk = self.registry.get(chunk_id)
+        chunk.kv_cache_allocated = True
+        chunk.cascade_level = 1  # OUTPUT chunks go to level 1
+        
+        # Track in allocated chunks
+        self._allocated_chunks[chunk_id] = 1
+        
+        return chunk_id
+    
+    def generate_and_retain_output(self,
+                                 system_prompt: str,
+                                 query: str,
+                                 context: Optional[Union[str, List[str]]] = None,
+                                 sampling_params: Optional[Dict[str, Any]] = None,
+                                 persist_chunks: bool = True) -> Dict[str, Any]:
+        """
+        Generate output and optionally retain it as a reusable chunk.
+        
+        This is like generate() but sets retain_output_cache=True in sampling params.
+        
+        Returns:
+            Dictionary with 'text', 'token_ids', 'chunk_ids', and 'output_chunk_id'
+        """
+        # Ensure sampling params exist and set retain flag
+        if sampling_params is None:
+            sampling_params = {}
+        sampling_params = sampling_params.copy()  # Don't modify caller's dict
+        sampling_params["retain_output_cache"] = True
+        
+        # Generate with retention
+        output = self.generate(
+            system_prompt=system_prompt,
+            query=query,
+            context=context,
+            sampling_params=sampling_params,
+            persist_chunks=persist_chunks
+        )
+        
+        # Get the retained sequence ID (it should be the last one)
+        retained_seqs = self.llm.get_retained_sequences()
+        if retained_seqs:
+            # Get the most recent sequence
+            seq_id = max(retained_seqs.keys())
+            
+            # Register it as an output chunk
+            output_chunk_id = self.register_output_chunk_from_retained(
+                seq_id=seq_id,
+                metadata={"query": query}
+            )
+            
+            output["output_chunk_id"] = output_chunk_id
+            output["retained_seq_id"] = seq_id
+        
+        return output

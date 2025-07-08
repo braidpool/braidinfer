@@ -100,5 +100,7 @@ class Scheduler:
             
             if should_stop:
                 seq.status = SequenceStatus.FINISHED
-                self.page_manager.deallocate(seq)
+                # Only deallocate if not retaining output cache
+                if not seq.retain_output_cache:
+                    self.page_manager.deallocate(seq)
                 self.running.remove(seq)

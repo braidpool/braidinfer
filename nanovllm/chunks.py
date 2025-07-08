@@ -15,6 +15,7 @@ class ChunkType(Enum):
     SYSTEM_PROMPT = "system_prompt"
     CONTEXT = "context"
     QUERY = "query"
+    OUTPUT = "output"  # Generated output that can be reused as context
 
 
 @dataclass

@@ -60,20 +60,30 @@ Need to handle `<think>...</think>` blocks in outputs - either:
 - [ ] Add commands to reuse previous outputs
 - [ ] Implement conversation memory management
 
-### 8. Testing
+### 8. Enhanced CLI Demo
+- [ ] Add output chunks section to cli.py's render_chunks_table()
+- [ ] Create /output command to list all output chunks
+- [ ] Add /use-output <chunk-id> command to add output chunk as context
+- [ ] Show output chunk preview with think tags removed
+- [ ] Add /delete-output <chunk-id> command for manual deallocation
+- [ ] Update help text with output chunk commands
+- [ ] Add visual indicators for output vs input chunks
+- [ ] Show memory usage of output chunks
+
+### 9. Testing
 - [ ] Create tests for output KV cache retention
 - [ ] Test multi-turn conversations with reused outputs
 - [ ] Verify think tag removal/masking works correctly
 - [ ] Benchmark memory savings and performance impact
 - [ ] Test edge cases (max memory, many outputs)
 
-### 9. Documentation
+### 10. Documentation
 - [ ] Document output chunk retention API
 - [ ] Create examples of multi-turn conversation optimization
 - [ ] Add memory management best practices
 - [ ] Update architecture docs with new flow
 
-### 10. Sprint Review
+### 11. Sprint Review
 - [ ] Verify all tests pass
 - [ ] Benchmark performance improvements
 - [ ] Review memory usage patterns

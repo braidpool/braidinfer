@@ -5,6 +5,7 @@ LLM Engine for single-GPU nano-vllm.
 import atexit
 from dataclasses import fields
 from time import perf_counter
+from typing import List, Optional, Tuple, Dict, Any
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
@@ -87,6 +88,9 @@ class LLMEngine:
         # Initialize timing stats
         self._timing_stats = []
         
+        # Track retained output sequences
+        self._retained_sequences: Dict[int, Tuple[Sequence, Dict[str, Any]]] = {}
+        
         # Register cleanup
         atexit.register(self.exit)
     
@@ -96,6 +100,10 @@ class LLMEngine:
 
     def exit(self):
         """Clean up resources."""
+        # Release all retained sequences first
+        if hasattr(self, '_retained_sequences'):
+            self.release_all_retained_sequences()
+        
         if hasattr(self, 'model_runner'):
             # Clean up model runner resources
             if hasattr(self.model_runner, 'model'):
@@ -171,6 +179,12 @@ class LLMEngine:
             for seq in seqs:
                 if seq.status == SequenceStatus.FINISHED:
                     finished_seqs.append(seq)
+                    
+                    # If output cache should be retained, store it
+                    if seq.retain_output_cache:
+                        cache_info = self.scheduler.page_manager.get_sequence_cache_info(seq)
+                        if cache_info:
+                            self._retained_sequences[seq.seq_id] = (seq, cache_info)
         
         return finished_seqs
 
@@ -285,3 +299,97 @@ class LLMEngine:
     def get_metrics(self) -> dict:
         """Get performance metrics."""
         return self.model_runner.get_metrics()
+    
+    def _find_think_tag_positions(self, token_ids: List[int]) -> Optional[Tuple[int, int]]:
+        """Find the positions of <think> and </think> tags in token list.
+        
+        Returns:
+            Tuple of (think_start_pos, think_end_pos) or None if no complete think tags found.
+            Positions are inclusive of the tags themselves.
+            If only opening tag is found, returns (think_start, len(token_ids)-1).
+        """
+        # Token IDs for Qwen3 model - these should be configurable per model
+        THINK_TOKEN_ID = 151667  # <think>
+        THINK_END_TOKEN_ID = 151668  # </think>
+        
+        think_start = None
+        think_end = None
+        
+        for i, token_id in enumerate(token_ids):
+            if token_id == THINK_TOKEN_ID and think_start is None:
+                think_start = i
+            elif token_id == THINK_END_TOKEN_ID and think_start is not None:
+                think_end = i
+                break
+        
+        if think_start is not None:
+            if think_end is not None:
+                return (think_start, think_end)
+            else:
+                # Unclosed think tag - treat rest of output as think content
+                return (think_start, len(token_ids) - 1)
+        return None
+    
+    def get_retained_sequences(self) -> Dict[int, Dict[str, Any]]:
+        """Get information about retained output sequences.
+        
+        Returns:
+            Dictionary mapping sequence ID to info dict containing:
+            - text: The generated text (without think tags if present)
+            - token_ids: The token IDs
+            - think_positions: Optional tuple of (start, end) positions of think tags
+            - cache_info: KV cache information
+        """
+        result = {}
+        for seq_id, (seq, cache_info) in self._retained_sequences.items():
+            # Get completion tokens
+            completion_tokens = seq.completion_token_ids
+            
+            # Find think tag positions if present
+            think_positions = self._find_think_tag_positions(completion_tokens)
+            
+            # Decode text
+            if think_positions:
+                # Decode without think tags
+                start_pos, end_pos = think_positions
+                tokens_without_think = (
+                    completion_tokens[:start_pos] + 
+                    completion_tokens[end_pos + 1:]
+                )
+                text = self.tokenizer.decode(tokens_without_think)
+            else:
+                text = self.tokenizer.decode(completion_tokens)
+            
+            result[seq_id] = {
+                "text": text,
+                "token_ids": completion_tokens,
+                "think_positions": think_positions,
+                "cache_info": cache_info,
+                "prompt_length": seq.num_prompt_tokens,
+                "completion_length": seq.num_completion_tokens
+            }
+        
+        return result
+    
+    def release_retained_sequence(self, seq_id: int) -> bool:
+        """Manually release a retained sequence's KV cache.
+        
+        Returns:
+            True if released, False if not found.
+        """
+        if seq_id not in self._retained_sequences:
+            return False
+        
+        # Deallocate the KV cache
+        self.scheduler.page_manager.deallocate_by_seq_id(seq_id)
+        
+        # Remove from retained sequences
+        del self._retained_sequences[seq_id]
+        
+        return True
+    
+    def release_all_retained_sequences(self):
+        """Release all retained sequences' KV cache."""
+        seq_ids = list(self._retained_sequences.keys())
+        for seq_id in seq_ids:
+            self.release_retained_sequence(seq_id)
