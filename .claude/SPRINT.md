@@ -1,53 +1,62 @@
-# Current Sprint: KV Cache Management System Repair
+# Current Sprint: True KV Cache Chunking Implementation
 
 ## Sprint Goal
-Repair the ChunkedLLM implementation to create an actual KV cache management system that reuses pre-computed KV caches from chunks, rather than just concatenating text and regenerating everything.
+Transition the chunk-based API from a prompt-building utility into a true KV cache management system by implementing pre-computation and direct reuse of chunk KV caches using FlashInfer's cascade attention.
 
-## Tasks
+## Tasks (Detailed Implementation Plan)
 
-### Phase 1: Infrastructure
-- [ ] Extend Chunk class to store KV cache metadata (page_indices, kv_length, position_offset)
-- [ ] Create ChunkKVCacheManager for dedicated chunk page allocation
-- [ ] Add chunk-specific page pool to PageManager
+### Phase 1: Core Engine & Memory Management
+- [ ] Modify PageManager to use chunk_page_tables: Dict[str, List[int]]
+- [ ] Add allocate_for_chunk(chunk_id, num_tokens) method
+- [ ] Add free_for_chunk(chunk_id) method
+- [ ] Add page_table field to Chunk dataclass
+- [ ] Link ChunkRegistry to PageManager for automatic cleanup
 
-### Phase 2: Core Implementation  
-- [ ] Implement _prefill_chunk method to actually populate KV cache
-- [ ] Create ChunkSequence class for chunk prefill operations
-- [ ] Add prefill_chunk method to ModelRunner
+### Phase 2: Chunk Prefill Implementation
+- [ ] Create ModelRunner.prefill_chunk(chunk) method
+- [ ] Implement _prefill_chunk in ChunkedLLM
+- [ ] Auto-prefill chunks on registration
+- [ ] Ensure KV cache population without sampling
 
-### Phase 3: Cascade Integration
-- [ ] Modify generate_from_chunks to check for and use pre-filled KV caches
-- [ ] Implement _build_cascade_data to create FlashInfer cascade structures
-- [ ] Add generate_with_cascade method to LLM class
+### Phase 3: Scheduler & Generation Overhaul
+- [ ] Replace FlashInferScheduler.schedule with build_cascade_data_for_composition
+- [ ] Create LLMEngine.generate_from_chunks(composition, params)
+- [ ] Build proper multi-level cascade data structures
+- [ ] Implement decode loop with cascade attention
 
-### Phase 4: Position Management
-- [ ] Implement position offset tracking for chunks
-- [ ] Ensure correct RoPE embeddings for composed sequences
-- [ ] Add position validation tests
+### Phase 4: API Refactoring
+- [ ] Remove ALL string building from generate_from_chunks
+- [ ] Direct composition of pre-computed KV caches
+- [ ] Update batch_generate_from_chunks similarly
+- [ ] Ensure no re-tokenization occurs
 
-### Phase 5: Testing & Validation
-- [ ] Create tests to verify KV cache is reused, not regenerated
-- [ ] Add memory usage tests to confirm retention
-- [ ] Benchmark performance improvements
+### Phase 5: Comprehensive Testing
+- [ ] Correctness: Verify identical outputs vs standard generation
+- [ ] Performance: Verify >10x speedup for cached chunks
+- [ ] Memory: Verify GPU memory freed on chunk deletion
+- [ ] Integration: Full cascade attention validation
 
-## Key Issues Found
+## Key Problems to Solve
 
-1. **_prefill_chunk is completely unimplemented** - Just contains TODO comment
-2. **generate_from_chunks only builds text prompts** - No KV cache reuse
-3. **Chunks don't store KV cache information** - Only text and metadata
-4. **No cascade attention usage** - Despite infrastructure being available
+1. **`_prefill_chunk` is a stub** - Core logic for pre-computing chunk KV cache is missing
+2. **Inefficient generation flow** - Current method reconstructs prompts, negating caching benefits
+3. **Inadequate scheduler** - FlashInferScheduler can't handle arbitrary chunk composition
+4. **Missing memory management** - No link between chunk deletion and KV cache deallocation
+5. **No cascade integration** - Despite having the infrastructure ready
 
-## Success Metrics
+## Success Criteria
 
-- Chunks store and reuse actual KV cache data
-- Memory usage reflects retained KV caches
-- Performance improvement for repeated chunk usage
-- Tests pass verifying KV cache reuse
+- `_prefill_chunk` is fully implemented and tested
+- `generate_from_chunks` directly uses pre-filled KV caches (no string building)
+- Performance shows >10x speedup for subsequent cached chunk usage
+- Memory tests confirm proper GPU memory management
+- Project delivers on the chunked API promise
 
-## Architecture Notes
+## Architecture Summary
 
-The implementation needs to:
-1. Use FlashInfer's MultiLevelCascadeAttentionWrapper for composed inference
-2. Allocate dedicated pages for chunks that persist across generations
-3. Track position offsets for correct attention computation
-4. Map chunk types to cascade levels (system→0, context→1, query→2)
+The new architecture treats chunks as first-class citizens:
+1. **Registration = Prefill**: KV cache computed immediately on chunk registration
+2. **Composition Objects**: Replace string concatenation with chunk compositions
+3. **Direct Cascade**: Use MultiLevelCascadeAttentionWrapper without re-tokenization
+4. **Memory Linked**: Chunk deletion automatically frees GPU memory
+5. **True Caching**: Subsequent calls reuse pre-computed KV caches entirely
