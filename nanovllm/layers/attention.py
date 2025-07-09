@@ -36,12 +36,45 @@ class Attention(nn.Module):
         self.layer_idx = layer_idx
         self.kv_cache = None # Set by ModelRunner
 
-    def _get_past_kv(self, seq: 'Sequence', page_manager: 'PageManager') -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    def _get_past_kv(self, seq: 'Sequence', page_manager: 'PageManager', context: Optional['InferenceContext'] = None) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Gathers the paged KV cache for a single sequence into continuous tensors."""
         k_cache_blocks = []
         v_cache_blocks = []
         
         layer_kv_cache = self.kv_cache
+        
+        # Check if we have active chunks - if so, gather KV from chunks instead
+        if context and hasattr(seq, 'active_chunks') and seq.active_chunks:
+            # Gather KV cache from chunks
+            for chunk in seq.active_chunks:
+                if chunk.page_table and chunk.kv_length > 0:
+                    # Process each page in the chunk
+                    for i, page_idx in enumerate(chunk.page_table):
+                        # Calculate how many tokens are on this page
+                        start_pos = i * page_manager.page_size
+                        end_pos = min((i + 1) * page_manager.page_size, chunk.kv_length)
+                        tokens_on_page = end_pos - start_pos
+                        
+                        if tokens_on_page > 0:
+                            page = layer_kv_cache[page_idx]
+                            k_page = page[0, :, :tokens_on_page, :]
+                            v_page = page[1, :, :tokens_on_page, :]
+                            
+                            k_page = k_page.transpose(0, 1)
+                            v_page = v_page.transpose(0, 1)
+                            
+                            k_cache_blocks.append(k_page)
+                            v_cache_blocks.append(v_page)
+            
+            if not k_cache_blocks:
+                return None, None
+                
+            k_cache_cont = torch.cat(k_cache_blocks, dim=0)
+            v_cache_cont = torch.cat(v_cache_blocks, dim=0)
+            
+            return k_cache_cont, v_cache_cont
+        
+        # Standard path - get KV from sequence pages
         num_cached_tokens = page_manager.seq_lengths.get(seq.seq_id, 0)
         
         if num_cached_tokens == 0:
@@ -99,7 +132,7 @@ class Attention(nn.Module):
         
         seq = context.sequences[0]
         
-        past_k, past_v = self._get_past_kv(seq, context.page_manager)
+        past_k, past_v = self._get_past_kv(seq, context.page_manager, context)
         
         if past_k is not None:
             k_full = torch.cat([past_k, k], dim=0)

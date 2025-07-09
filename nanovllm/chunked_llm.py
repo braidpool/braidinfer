@@ -308,28 +308,8 @@ class ChunkedLLM:
                 final_result = item
             return final_result if final_result else {"text": "", "token_ids": []}
         else:
-            # For streaming, wrap the generator to debug
-            def debug_generator():
-                try:
-                    print(f"[DEBUG ChunkedLLM] Starting to consume generator")
-                    print(f"[DEBUG ChunkedLLM] Generator type: {type(result)}")
-                    item_count = 0
-                    for item in result:
-                        item_count += 1
-                        finished = item.get('finished', False)
-                        text = item.get('text', '')
-                        if len(text) > 0 or finished:
-                            print(f"[DEBUG ChunkedLLM] Item {item_count}: finished={finished}, "
-                                  f"text='{text[:20]}...', token_count={len(item.get('token_ids', []))}")
-                        yield item
-                    print(f"[DEBUG ChunkedLLM] Generator exhausted after {item_count} items")
-                except Exception as e:
-                    print(f"[DEBUG ChunkedLLM] Error in generator: {e}")
-                    import traceback
-                    traceback.print_exc()
-                    raise
-            
-            return debug_generator()
+            # For streaming, return generator directly
+            return result
     
     def batch_generate_from_chunks(self,
                                  requests: List[Dict[str, Any]],

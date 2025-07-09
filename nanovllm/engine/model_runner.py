@@ -101,8 +101,8 @@ class ModelRunner:
             position_offset = 0
             if hasattr(seq, '_chunk_token_count'):
                 position_offset = seq._chunk_token_count
-                print(f"[DEBUG] Prefill positions: offset={position_offset}, tokens={len(tokens)}, "
-                      f"positions={position_offset} to {position_offset + len(tokens) - 1}")
+                # print(f"[DEBUG] Prefill positions: offset={position_offset}, tokens={len(tokens)}, "
+                #       f"positions={position_offset} to {position_offset + len(tokens) - 1}")
             
             positions_list = list(range(position_offset, position_offset + len(tokens)))
             
@@ -178,7 +178,8 @@ class ModelRunner:
             # Create inference context with the appropriate wrapper
             # Debug active chunks
             if active_chunks is not None:
-                print(f"[DEBUG ModelRunner] Creating context with {len(active_chunks)} active chunks")
+                # print(f"[DEBUG ModelRunner] Creating context with {len(active_chunks)} active chunks")
+                pass
             
             context = InferenceContext(
                 sequences=seqs,

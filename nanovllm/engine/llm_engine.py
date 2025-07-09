@@ -522,14 +522,14 @@ class LLMEngine:
             seq._full_context_length = len(all_token_ids) + 1
             seq._chunk_token_count = chunk_token_count
         
-        # Debug: Check what tokens we're processing
-        print(f"[DEBUG] Sequence tokens to prefill: {len(seq.token_ids)} tokens: {seq.token_ids}")
-        print(f"[DEBUG] Full context: {len(all_token_ids)} tokens (chunks: {chunk_token_count}, prompt: {len(generation_prompt_tokens)})")
+        # Debug: Check what tokens we're processing (commented out for cleaner output)
+        # print(f"[DEBUG] Sequence tokens to prefill: {len(seq.token_ids)} tokens: {seq.token_ids}")
+        # print(f"[DEBUG] Full context: {len(all_token_ids)} tokens (chunks: {chunk_token_count}, prompt: {len(generation_prompt_tokens)})")
         
-        # Debug chunk contents
-        print(f"[DEBUG] Chunk contents:")
-        for i, chunk in enumerate(all_chunks):
-            print(f"  Chunk {i} ({chunk.chunk_type}): '{chunk.content[:50]}...' ({len(chunk.token_ids)} tokens)")
+        # Debug chunk contents (commented out for cleaner output)
+        # print(f"[DEBUG] Chunk contents:")
+        # for i, chunk in enumerate(all_chunks):
+        #     print(f"  Chunk {i} ({chunk.chunk_type}): '{chunk.content[:50]}...' ({len(chunk.token_ids)} tokens)")
         
         # Now we need to set up the sequence to use the pre-existing KV cache from chunks
         if use_custom_kernel:
@@ -553,13 +553,15 @@ class LLMEngine:
                 # Pre-register the sequence with its page table
                 # This prevents the scheduler from trying to allocate new pages
                 self.scheduler.page_manager.seq_page_tables[seq.seq_id] = combined_page_table
-                self.scheduler.page_manager.seq_lengths[seq.seq_id] = 0  # Will be updated during generation
+                # Set the sequence length to the total KV cache length from chunks
+                self.scheduler.page_manager.seq_lengths[seq.seq_id] = total_kv_length
                 
-                print(f"[DEBUG] Pre-registered seq {seq.seq_id} with {len(combined_page_table)} pages")
+                # print(f"[DEBUG] Pre-registered seq {seq.seq_id} with {len(combined_page_table)} pages")
+                pass
             
-            # Debug info
-            print(f"[DEBUG] KV cached length: {total_kv_length}, num_cached_tokens: {seq.num_cached_tokens}")
-            print(f"[DEBUG] EOS token: {self.config.eos}")
+            # Debug info (commented out)
+            # print(f"[DEBUG] KV cached length: {total_kv_length}, num_cached_tokens: {seq.num_cached_tokens}")
+            # print(f"[DEBUG] EOS token: {self.config.eos}")
                 
             # Store active chunks in sequence for custom kernel to use during decode
             seq.active_chunks = all_chunks
@@ -573,13 +575,13 @@ class LLMEngine:
             raise RuntimeError("Non-custom kernel path is no longer supported. This code path should not be reached.")
         
         # Add sequence to scheduler normally
-        print(f"[DEBUG] Before scheduler.add: seq {seq.seq_id} has {len(seq.token_ids)} tokens, status={seq.status}")
+        # print(f"[DEBUG] Before scheduler.add: seq {seq.seq_id} has {len(seq.token_ids)} tokens, status={seq.status}")
         self.scheduler.add(seq)
-        print(f"[DEBUG] After scheduler.add: waiting={len(self.scheduler.waiting)}, running={len(self.scheduler.running)}")
+        # print(f"[DEBUG] After scheduler.add: waiting={len(self.scheduler.waiting)}, running={len(self.scheduler.running)}")
         
         if stream:
             # Use the standard streaming generation method
-            print(f"[DEBUG] Starting streaming generation")
+            # print(f"[DEBUG] Starting streaming generation")
             self._debug_generate_from_chunks = True
             
             # Yield from the streaming generator
