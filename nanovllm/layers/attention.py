@@ -12,6 +12,8 @@ if TYPE_CHECKING:
     from nanovllm.engine.sequence import Sequence
     from nanovllm.engine.page_manager import PageManager
 
+from .cascade_attention import CascadeAttention
+
 
 class Attention(nn.Module):
     """
@@ -35,6 +37,15 @@ class Attention(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.layer_idx = layer_idx
         self.kv_cache = None # Set by ModelRunner
+        
+        # Create cascade attention handler
+        self.cascade_attention = CascadeAttention(
+            num_heads=num_heads,
+            head_dim=head_dim,
+            scale=scale,
+            num_kv_heads=num_kv_heads,
+            page_size=16  # Default page size
+        )
 
     def _get_past_kv(self, seq: 'Sequence', page_manager: 'PageManager', context: Optional['InferenceContext'] = None) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
         """Gathers the paged KV cache for a single sequence into continuous tensors."""
@@ -132,6 +143,32 @@ class Attention(nn.Module):
         
         seq = context.sequences[0]
         
+        # Check if we should use cascade attention for chunks
+        if hasattr(seq, 'active_chunks') and seq.active_chunks and self.kv_cache is not None:
+            # Debug prints disabled for cleaner output
+            pass
+            
+            # Use cascade attention for proper position handling
+            cascade_levels = self.cascade_attention.create_cascade_levels(
+                seq.active_chunks, context.page_manager
+            )
+            
+            if cascade_levels:
+                # Set page size from page manager
+                if hasattr(context.page_manager, 'page_size'):
+                    self.cascade_attention.page_size = context.page_manager.page_size
+                
+                # Run cascade attention
+                output = self.cascade_attention.forward(
+                    query=q,
+                    kv_cache=self.kv_cache,
+                    cascade_levels=cascade_levels,
+                    layer_idx=self.layer_idx,
+                    causal_mask=context.is_prefill
+                )
+                return output
+        
+        # Standard attention path (no chunks)
         past_k, past_v = self._get_past_kv(seq, context.page_manager, context)
         
         if past_k is not None:

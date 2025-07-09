@@ -44,6 +44,10 @@ class Chunk:
     kv_length: int = 0  # Number of tokens in KV cache
     position_offset: int = 0  # Starting position for RoPE embeddings
     
+    # Position tracking for cascade attention
+    global_position_start: int = 0  # Global position where this chunk starts
+    global_position_end: int = 0    # Global position where this chunk ends
+    
     @classmethod
     def from_content(cls, content: str, chunk_type: ChunkType, 
                     tokenizer=None, metadata: Optional[Dict[str, Any]] = None) -> 'Chunk':

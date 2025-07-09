@@ -380,6 +380,9 @@ class Qwen3AttentionFused(nn.Module):
             # The attention module expects q, k, v in flat shape, not head shape
             attn_output = self.attn(q_flat, k_flat, v_flat, context)
             
+            # Debug disabled
+            pass
+            
         # Output projection
         if self.use_fused_output and residual is not None:
             # Use fused output projection + residual

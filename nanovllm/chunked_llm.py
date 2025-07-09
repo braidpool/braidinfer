@@ -74,7 +74,8 @@ class ChunkedLLM:
     def register_chunk(self,
                       content: str,
                       chunk_type: ChunkType,
-                      metadata: Optional[Dict[str, Any]] = None) -> str:
+                      metadata: Optional[Dict[str, Any]] = None,
+                      global_position_start: Optional[int] = None) -> str:
         """
         Register a new chunk or retrieve existing one.
         
