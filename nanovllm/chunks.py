@@ -40,12 +40,15 @@ class Chunk:
     # KV cache allocation info (set by engine)
     kv_cache_allocated: bool = False
     cascade_level: Optional[int] = None
+    page_table: Optional[List[int]] = None  # Page indices for KV cache
+    kv_length: int = 0  # Number of tokens in KV cache
+    position_offset: int = 0  # Starting position for RoPE embeddings
     
     @classmethod
     def from_content(cls, content: str, chunk_type: ChunkType, 
                     tokenizer=None, metadata: Optional[Dict[str, Any]] = None) -> 'Chunk':
         """Create a chunk from content with automatic ID generation."""
-        chunk_id = hashlib.sha256(content.encode()).hexdigest()
+        chunk_id = hashlib.sha256(f"{chunk_type.value}:{content}".encode()).hexdigest()
         
         # Tokenize if tokenizer provided
         token_ids = []

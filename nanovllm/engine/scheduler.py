@@ -14,12 +14,19 @@ class Scheduler:
         
         # Create page manager
         hf_config = config.hf_config
+        
+        # Calculate head_dim if not present
+        if hasattr(hf_config, 'head_dim'):
+            head_dim = hf_config.head_dim
+        else:
+            head_dim = hf_config.hidden_size // hf_config.num_attention_heads
+            
         self.page_manager = PageManager(
             num_pages=config.num_kvcache_blocks,
             page_size=config.kvcache_block_size,
             num_layers=hf_config.num_hidden_layers,
             num_kv_heads=hf_config.num_key_value_heads,
-            head_dim=hf_config.head_dim,
+            head_dim=head_dim,
             dtype=hf_config.torch_dtype
         )
         

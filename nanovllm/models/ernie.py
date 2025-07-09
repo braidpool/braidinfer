@@ -8,7 +8,6 @@ from transformers import PretrainedConfig
 
 from nanovllm.layers.activation import SiluAndMul
 from nanovllm.layers.attention import Attention
-from nanovllm.layers.flashinfer_cascade_attention import FlashInferCascadeAttention
 from nanovllm.layers.layernorm import RMSNorm
 from nanovllm.layers.linear import QKVParallelLinear, MergedColumnParallelLinear, RowParallelLinear
 from nanovllm.layers.rotary_embedding import get_rope
@@ -69,25 +68,13 @@ class ERNIE45Attention(nn.Module):
             rope_scaling=rope_scaling,
         )
         
-        # Check if cascade attention should be used
-        use_cascade = getattr(self, '_use_cascade_attention', False)
-        
-        if use_cascade:
-            self.attn = FlashInferCascadeAttention(
-                self.num_heads,
-                self.head_dim,
-                self.scaling,
-                self.num_kv_heads,
-                self.layer_idx
-            )
-        else:
-            self.attn = Attention(
-                self.num_heads,
-                self.head_dim,
-                self.scaling,
-                self.num_kv_heads,
-                self.layer_idx
-            )
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            self.num_kv_heads,
+            self.layer_idx
+        )
 
     def forward(
         self,
@@ -164,24 +151,13 @@ class ERNIE45AttentionFused(nn.Module):
         if use_custom_chunk_kernel:
             self.attn = None  # Handle manually
         else:
-            use_cascade = getattr(self, '_use_cascade_attention', False)
-            
-            if use_cascade:
-                self.attn = FlashInferCascadeAttention(
-                    self.num_heads,
-                    self.head_dim,
-                    self.scaling,
-                    self.num_kv_heads,
-                    self.layer_idx
-                )
-            else:
-                self.attn = Attention(
-                    self.num_heads,
-                    self.head_dim,
-                    self.scaling,
-                    self.num_kv_heads,
-                    self.layer_idx
-                )
+            self.attn = Attention(
+                self.num_heads,
+                self.head_dim,
+                self.scaling,
+                self.num_kv_heads,
+                self.layer_idx
+            )
     
     def forward(
         self,

@@ -40,12 +40,6 @@ class ChunkedLLM:
         self.model_path = model_path
         self.chunk_memory_ratio = chunk_memory_ratio
         
-        # Initialize chunk registry
-        self.registry = ChunkRegistry(
-            max_chunks=max_chunks,
-            enable_deduplication=enable_deduplication
-        )
-        
         # Calculate memory allocation
         if 'num_kvcache_blocks' in llm_kwargs:
             total_blocks = llm_kwargs.pop('num_kvcache_blocks')
@@ -53,16 +47,26 @@ class ChunkedLLM:
             total_blocks = 256
         chunk_blocks = int(total_blocks * chunk_memory_ratio)
         
-        # Initialize base LLM with cascade attention
+        # Initialize base LLM
+        # Check if custom chunk kernel is requested
+        use_custom_chunk_kernel = llm_kwargs.get('model_kwargs', {}).get('use_custom_chunk_kernel', False)
+        
+        # Create LLM instance (custom kernels are now always used)
         self.llm = LLM(
             model_path,
-            enable_cascade_attention=True,
             num_kvcache_blocks=total_blocks,
             **llm_kwargs
         )
         
         # Initialize tokenizer
         self.tokenizer = AutoTokenizer.from_pretrained(model_path)
+        
+        # Initialize chunk registry with page manager
+        self.registry = ChunkRegistry(
+            max_chunks=max_chunks,
+            enable_deduplication=enable_deduplication,
+            page_manager=self.llm.model_runner.page_manager
+        )
         
         # Track allocated chunks for KV cache management
         self._allocated_chunks: Dict[str, int] = {}  # chunk_id -> cascade_level
@@ -92,6 +96,12 @@ class ChunkedLLM:
         
         # Register in registry
         chunk_id = self.registry.register(chunk)
+        
+        # Prefill the chunk immediately if it's new
+        # Note: deduplication may return an existing chunk that's already prefilled
+        registered_chunk = self.registry.get(chunk_id)
+        if not registered_chunk.kv_cache_allocated:
+            self._prefill_chunk(registered_chunk)
         
         return chunk_id
     
@@ -230,14 +240,19 @@ class ChunkedLLM:
             ChunkNotFoundError if any chunk doesn't exist
             InvalidCompositionError if composition violates constraints
         """
-        # Validate and retrieve chunks
+        # Retrieve and prefill chunks if needed
         system_chunk = self.registry.get(system_chunk_id)
-        query_chunk = self.registry.get(query_chunk_id)
+        if not system_chunk.kv_cache_allocated:
+            self._prefill_chunk(system_chunk)
         
         if system_chunk.chunk_type != ChunkType.SYSTEM_PROMPT:
             raise InvalidCompositionError(
                 f"Chunk {system_chunk_id} is not a system prompt"
             )
+        
+        query_chunk = self.registry.get(query_chunk_id)
+        if not query_chunk.kv_cache_allocated:
+            self._prefill_chunk(query_chunk)
         
         if query_chunk.chunk_type != ChunkType.QUERY:
             raise InvalidCompositionError(
@@ -248,6 +263,9 @@ class ChunkedLLM:
         if context_chunk_ids:
             for ctx_id in context_chunk_ids:
                 ctx_chunk = self.registry.get(ctx_id)
+                if not ctx_chunk.kv_cache_allocated:
+                    self._prefill_chunk(ctx_chunk)
+                
                 # Allow OUTPUT chunks to be used as context
                 if ctx_chunk.chunk_type not in (ChunkType.CONTEXT, ChunkType.OUTPUT):
                     raise InvalidCompositionError(
@@ -255,8 +273,12 @@ class ChunkedLLM:
                     )
                 context_chunks.append(ctx_chunk)
         
-        # Build prompt from chunks
-        prompt = self._build_prompt(system_chunk, context_chunks, query_chunk)
+        # Create composition (NO STRING BUILDING)
+        composition = {
+            'system_chunk': system_chunk,
+            'context_chunks': context_chunks,
+            'query_chunk': query_chunk
+        }
         
         # Convert sampling params
         if sampling_params is None:
@@ -268,22 +290,46 @@ class ChunkedLLM:
         else:
             sp = SamplingParams(**sampling_params)
         
-        # Generate
-        if stream:
-            # Streaming mode - properly yield from the generator
-            for output in self.llm.generate([prompt], sp, stream=True):
-                yield output
+        # Generate using engine's new method (NO STRING CONCATENATION)
+        # Determine if we should use custom kernel based on initialization
+        use_custom_kernel = hasattr(self.llm, 'config') and getattr(self.llm.config, 'use_custom_chunk_kernel', False)
+        # Debug output disabled for cleaner output
+        pass
+        result = self.llm.generate_from_chunks(composition, sp, stream, use_custom_kernel=use_custom_kernel)
+        # Debug output disabled
+        pass
+        
+        # If not streaming, consume the generator to get the final result
+        if not stream:
+            # For non-streaming, get the final result from generator
+            final_result = None
+            for item in result:
+                # For non-streaming, we want the last item which has the complete result
+                final_result = item
+            return final_result if final_result else {"text": "", "token_ids": []}
         else:
-            # Non-streaming mode
-            outputs = self.llm.generate([prompt], sp)
+            # For streaming, wrap the generator to debug
+            def debug_generator():
+                try:
+                    print(f"[DEBUG ChunkedLLM] Starting to consume generator")
+                    print(f"[DEBUG ChunkedLLM] Generator type: {type(result)}")
+                    item_count = 0
+                    for item in result:
+                        item_count += 1
+                        finished = item.get('finished', False)
+                        text = item.get('text', '')
+                        if len(text) > 0 or finished:
+                            print(f"[DEBUG ChunkedLLM] Item {item_count}: finished={finished}, "
+                                  f"text='{text[:20]}...', token_count={len(item.get('token_ids', []))}")
+                        yield item
+                    print(f"[DEBUG ChunkedLLM] Generator exhausted after {item_count} items")
+                except Exception as e:
+                    print(f"[DEBUG ChunkedLLM] Error in generator: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    raise
             
-            if not outputs:
-                return {"text": "", "token_ids": []}
-            
-            return {
-                "text": outputs[0]["text"],
-                "token_ids": outputs[0].get("token_ids", [])
-            }
+            return debug_generator()
     
     def batch_generate_from_chunks(self,
                                  requests: List[Dict[str, Any]],
@@ -511,84 +557,58 @@ class ChunkedLLM:
         
         return prompt
     
-    def _prefill_chunk(self, chunk: Chunk, position_offset: int) -> None:
+    def _prefill_chunk(self, chunk: Chunk) -> None:
         """
-        Prefill KV cache for a chunk with position-aware generation.
+        Prefill KV cache for a chunk.
         
-        This method uses the lower-level model API to populate the KV cache
-        for a chunk at the specified position offset, ensuring correct RoPE
-        embeddings for composed generation.
+        This method allocates pages and populates the KV cache for a chunk,
+        enabling it to be reused directly in subsequent generations.
         
         Args:
             chunk: The chunk to prefill
-            position_offset: Starting position for this chunk in the composed sequence
         """
+        # Check if already allocated (defensive programming)
+        if chunk.kv_cache_allocated:
+            return
+        
         # Get token IDs for the chunk
-        token_ids = chunk.token_ids
-        if not token_ids:
+        if not chunk.token_ids:
             # Tokenize if not already done
-            token_ids = self.tokenizer.encode(chunk.content, add_special_tokens=False)
-            chunk.token_ids = token_ids
+            chunk.token_ids = self.tokenizer.encode(chunk.content, add_special_tokens=False)
         
-        # Create position tensor with offset
-        positions = torch.arange(
-            position_offset, 
-            position_offset + len(token_ids),
-            dtype=torch.long,
-            device="cuda"
-        )
+        # Skip empty chunks (no tokens to prefill)
+        if not chunk.token_ids:
+            chunk.kv_cache_allocated = True  # Mark as "allocated" even though it's empty
+            chunk.page_table = []
+            chunk.kv_length = 0
+            return
         
-        # Convert token IDs to tensor
-        input_ids = torch.tensor(token_ids, dtype=torch.long, device="cuda").unsqueeze(0)
-        
-        # Get the model from llm
-        model = self.llm.model_runner.model
-        
-        # Create a minimal inference context for KV cache storage
-        # This needs to be set up properly with page allocation
-        # For now, we'll document the approach:
-        
-        # 1. Allocate KV cache pages for this chunk
-        # 2. Create sequence object for tracking
-        # 3. Run model forward pass with positions
-        # 4. Store KV cache reference for chunk composition
-        
-        # TODO: Complete implementation with proper page allocation
-        # This requires integration with the page manager and cascade attention setup
-        
-        # Forward pass through model to populate KV cache
-        with torch.no_grad():
-            # Create InferenceContext with chunk information
-            from nanovllm.engine.inference_context import InferenceContext
-            from nanovllm.engine.sequence import Sequence
-            
-            # Create a sequence for this chunk
-            seq = Sequence(
-                seq_id=f"chunk_{chunk.chunk_id}",
-                prompt_token_ids=token_ids,
-                max_tokens=0,  # No generation, just prefill
-                temperature=1.0,
-                top_p=1.0,
-                top_k=-1
+        # Check if pages already allocated in page manager
+        if chunk.chunk_id in self.llm.model_runner.page_manager.chunk_page_tables:
+            # Pages already allocated, just update chunk metadata
+            chunk.page_table = self.llm.model_runner.page_manager.chunk_page_tables[chunk.chunk_id]
+            chunk.kv_length = len(chunk.token_ids)
+        else:
+            # Allocate pages from PageManager
+            page_table = self.llm.model_runner.page_manager.allocate_for_chunk(
+                chunk.chunk_id, 
+                len(chunk.token_ids)
             )
             
-            # Set up context for prefill
-            context = InferenceContext(
-                is_prefill=True,
-                sequences=[seq],
-                page_manager=self.llm.model_runner.page_manager,
-                wrapper=self.llm.model_runner.prefill_wrapper
-            )
+            # Store page table in chunk
+            chunk.page_table = page_table
+            chunk.kv_length = len(chunk.token_ids)
             
-            # Run model forward pass
-            hidden_states = model(input_ids, positions, context)
-            
-            # Mark chunk as having KV cache allocated
-            chunk.kv_cache_allocated = True
-            chunk.cascade_level = self._determine_cascade_level(chunk.chunk_type)
-            
-            # Store allocation info
-            self._allocated_chunks[chunk.chunk_id] = chunk.cascade_level
+            # Run prefill through model
+            # Debug output disabled for cleaner output
+            self.llm.model_runner.prefill_chunk(chunk)
+        
+        # Mark as allocated
+        chunk.kv_cache_allocated = True
+        chunk.cascade_level = self._determine_cascade_level(chunk.chunk_type)
+        
+        # Store allocation info
+        self._allocated_chunks[chunk.chunk_id] = chunk.cascade_level
     
     def _determine_cascade_level(self, chunk_type: ChunkType) -> int:
         """

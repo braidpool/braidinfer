@@ -28,17 +28,21 @@ class ChunkedFastChat:
         # Create ChunkedLLM instance
         expanded_path = os.path.expanduser(model_path)
         
+        # Model kwargs no longer needed - custom kernels are always used
+        model_kwargs = {}
+        
         self.llm = ChunkedLLM(
             expanded_path,
             max_chunks=1000,
             chunk_memory_ratio=0.5,
             enable_deduplication=True,
             enforce_eager=True,
+            model_kwargs=model_kwargs
         )
         
         load_time = time.time() - start_time
         print(f" Done! ({load_time:.1f}s)")
-        print(f"Using ChunkedLLM with content-based deduplication")
+        print(f"Using ChunkedLLM with content-based deduplication and custom paged kernel")
         print()
         
         # Conversation management
@@ -51,8 +55,8 @@ class ChunkedFastChat:
         self.total_tokens_generated = 0
         self.chunk_stats_history = []
         
-        # Set default system prompt
-        self._set_system_prompt("You are a helpful AI assistant.")
+        # Set default system prompt with language hint
+        self._set_system_prompt("You are a helpful AI assistant. Please respond in English.")
     
     def _set_system_prompt(self, prompt: str):
         """Set or update the system prompt chunk."""
@@ -106,23 +110,15 @@ class ChunkedFastChat:
     
     def generate_response(self, user_input: str) -> None:
         """Generate and stream response to user input using chunks."""
-        # Register user message as a chunk
-        user_chunk_id = self.llm.register_chunk(
+        # Get context from previous turns.
+        context_chunk_ids = self._build_context_chunks()
+
+        # The user's input is the new query.
+        query_chunk_id = self.llm.register_chunk(
             user_input,
-            ChunkType.CONTEXT,  # User messages are context
+            ChunkType.QUERY,
             metadata={"role": "user", "timestamp": time.time()}
         )
-        self.conversation_chunk_ids.append(("user", user_chunk_id))
-        
-        # Create query chunk (what we're asking the model to respond to)
-        query_chunk_id = self.llm.register_chunk(
-            "Please respond to the user's message.",
-            ChunkType.QUERY,
-            metadata={"timestamp": time.time()}
-        )
-        
-        # Get context chunks (previous conversation)
-        context_chunk_ids = self._build_context_chunks()
         
         # Show chunk usage info
         stats_before = self.llm.get_chunk_stats()
@@ -172,6 +168,15 @@ class ChunkedFastChat:
             
             # Filter think tags for conversation history
             filtered_text = self._filter_think_tags(generated_text)
+
+            # Add user's message to history for the next turn.
+            # Note: We register it as CONTEXT now. With the chunk_id fix, this is a new chunk.
+            user_context_chunk_id = self.llm.register_chunk(
+                user_input,
+                ChunkType.CONTEXT,
+                metadata={"role": "user", "timestamp": time.time()}
+            )
+            self.conversation_chunk_ids.append(("user", user_context_chunk_id))
             
             # Register assistant response as a chunk for future context
             assistant_chunk_id = self.llm.register_chunk(
@@ -356,6 +361,7 @@ Examples:
     print(f"Configuration:")
     print(f"  Model: {args.model}")
     print(f"  Max conversation chunks: {args.max_chunks}")
+    print(f"  Attention mode: custom paged kernel")
     print(f"  Using ChunkedLLM with content deduplication")
     print()
     

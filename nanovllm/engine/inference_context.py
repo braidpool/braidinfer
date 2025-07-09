@@ -8,6 +8,9 @@ import torch
 
 from nanovllm.engine.sequence import Sequence
 
+if TYPE_CHECKING:
+    from nanovllm.chunks import Chunk
+
 
 
 @dataclass
@@ -34,6 +37,16 @@ class InferenceContext:
     
     # Workspace buffer for cascade attention
     _workspace_buffer: Optional[torch.Tensor] = None
+    
+    # For chunk prefilling - chunk_id and positions
+    chunk_id: Optional[str] = None
+    chunk_positions: Optional[torch.Tensor] = None
+    
+    # Active chunks for custom chunk attention
+    active_chunks: Optional[List['Chunk']] = None
+    
+    # Global KV cache reference for custom chunk attention
+    kv_cache: Optional[torch.Tensor] = None
     
     def get_wrapper(self, layer_idx: int = None):
         """Get the wrapper. Layer index is ignored since we use a single wrapper."""

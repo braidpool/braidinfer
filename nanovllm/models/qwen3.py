@@ -8,7 +8,6 @@ from transformers import Qwen3Config
 
 from nanovllm.layers.activation import SiluAndMul
 from nanovllm.layers.attention import Attention
-from nanovllm.layers.flashinfer_cascade_attention import FlashInferCascadeAttention
 from nanovllm.layers.layernorm import RMSNorm
 from nanovllm.layers.linear import QKVParallelLinear, MergedColumnParallelLinear, RowParallelLinear
 from nanovllm.layers.rotary_embedding import get_rope
@@ -74,26 +73,13 @@ class Qwen3Attention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
-        # Check if cascade attention should be used
-        # This is set by the model loader based on config
-        use_cascade = getattr(self, '_use_cascade_attention', False)
-        
-        if use_cascade:
-            self.attn = FlashInferCascadeAttention(
-                self.num_heads,
-                self.head_dim,
-                self.scaling,
-                self.num_kv_heads,
-                self.layer_idx
-            )
-        else:
-            self.attn = Attention(
-                self.num_heads,
-                self.head_dim,
-                self.scaling,
-                self.num_kv_heads,
-                self.layer_idx,
-            )
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            self.num_kv_heads,
+            self.layer_idx,
+        )
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
@@ -163,7 +149,6 @@ class Qwen3AttentionFused(nn.Module):
         rope_theta: float = 10000.0,  # Standard default, should be overridden by config
         rope_scaling: dict = None,
         max_position: int = 8192,
-        use_custom_chunk_kernel: bool = False,
         use_fused_output: bool = False,  # Disabled due to shape issues
     ):
         super().__init__()
@@ -185,7 +170,6 @@ class Qwen3AttentionFused(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.use_custom_chunk_kernel = use_custom_chunk_kernel
         
         # Store norm eps for fused kernel (weight will be passed from decoder layer)
         self.rms_norm_eps = rms_norm_eps
@@ -209,32 +193,16 @@ class Qwen3AttentionFused(nn.Module):
             rope_scaling=rope_scaling,
         )
         
-        # Attention implementation based on configuration
-        if use_custom_chunk_kernel:
-            # Will use ChunkAttention for custom kernels
-            self.attn = None  # We'll handle attention manually
-        else:
-            # Check if cascade attention should be used
-            use_cascade = getattr(self, '_use_cascade_attention', False)
-            
-            if use_cascade:
-                self.attn = FlashInferCascadeAttention(
-                    self.num_heads,
-                    self.head_dim,
-                    self.scaling,
-                    self.num_kv_heads,
-                    self.layer_idx
-                )
-            else:
-                # Use SimpleAttention as fallback for custom kernels
-                from nanovllm.layers.attention import Attention
-                self.attn = Attention(
-                    self.num_heads,
-                    self.head_dim,
-                    self.scaling,
-                    self.num_kv_heads,
-                    self.layer_idx,
-                )
+        # Always create standard attention module for prefill
+        # Custom chunk kernel is used automatically when active_chunks present
+        from nanovllm.layers.attention import Attention
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            self.num_kv_heads,
+            self.layer_idx,
+        )
                 
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -365,19 +333,50 @@ class Qwen3AttentionFused(nn.Module):
         
         # Apply attention without scale compensation
         # The K normalization already handles the scaling appropriately
-        if self.use_custom_chunk_kernel and context is not None:
-            # Use custom chunk attention kernel
-            # This assumes context has chunk information
-            attn_output = ChunkAttention.decode_attention(
-                q, 
-                context.chunk_k_caches,  # These would need to be set up
-                context.chunk_v_caches,
-                context.chunk_lengths,
-                context.chunk_levels,
-                scale=self.scaling
+        # Debug context status (only for layer 0 to reduce noise)
+        if context is not None and self.layer_idx == 0:
+            has_chunks = context.active_chunks is not None
+            if has_chunks:
+                # Debug output disabled for cleaner output
+                pass
+        
+        # For prefill with multiple tokens, we need to use standard attention
+        # Custom chunk kernel only supports single query token (decode)
+        is_single_token = q_flat.shape[0] == self.q_size
+        
+        
+        if context is not None and context.active_chunks is not None and is_single_token:
+            # Use custom chunk attention kernel with paged KV cache (decode only)
+            # Debug output disabled for cleaner output
+            pass
+            from nanovllm.kernels.paged_chunk_attention import PagedChunkAttention
+            
+            # Create chunk attention instance if not exists
+            if not hasattr(self, '_chunk_attention'):
+                self._chunk_attention = PagedChunkAttention(
+                    head_dim=self.head_dim,
+                    scale=self.scaling
+                )
+            
+            # Reshape q for chunk attention: [num_heads, head_dim]
+            q_for_chunk = q.view(self.num_heads, self.head_dim)
+            
+            # Get page size from context
+            page_size = context.page_manager.page_size if context.page_manager else 16
+            
+            # Run chunk attention with paged KV cache
+            attn_output = self._chunk_attention.forward(
+                query=q_for_chunk,
+                chunks=context.active_chunks,
+                kv_cache=context.kv_cache,
+                layer_idx=self.layer_idx,
+                page_size=page_size
             )
+            
+            # Reshape output back to flat shape
+            attn_output = attn_output.view(-1)
         else:
-            # Use standard attention
+            # Use standard attention - this is normal for regular generation without chunks
             # The attention module expects q, k, v in flat shape, not head shape
             attn_output = self.attn(q_flat, k_flat, v_flat, context)
             
@@ -467,7 +466,6 @@ class Qwen3DecoderLayer(nn.Module):
                 rope_theta=rope_theta,
                 rope_scaling=rope_scaling,
                 max_position=max_position_embeddings,
-                use_custom_chunk_kernel=getattr(config, "use_custom_chunk_kernel", False),
             )
         else:
             # Use standard attention

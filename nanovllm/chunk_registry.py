@@ -22,16 +22,18 @@ class ChunkRegistry:
     - Metadata filtering
     """
     
-    def __init__(self, max_chunks: int = 1000, enable_deduplication: bool = True):
+    def __init__(self, max_chunks: int = 1000, enable_deduplication: bool = True, page_manager=None):
         """
         Initialize chunk registry.
         
         Args:
             max_chunks: Maximum number of chunks to keep in memory
             enable_deduplication: Whether to deduplicate by content hash
+            page_manager: PageManager instance for KV cache allocation
         """
         self.max_chunks = max_chunks
         self.enable_deduplication = enable_deduplication
+        self.page_manager = page_manager
         
         # Thread-safe chunk storage (OrderedDict for LRU)
         self._lock = threading.RLock()
@@ -153,7 +155,7 @@ class ChunkRegistry:
     
     def delete(self, chunk_id: str) -> bool:
         """
-        Delete a chunk.
+        Delete a chunk and free its KV cache pages.
         
         Args:
             chunk_id: ID of chunk to delete
@@ -163,13 +165,18 @@ class ChunkRegistry:
         """
         with self._lock:
             if chunk_id in self._chunks:
+                # Free KV cache pages if allocated
+                chunk = self._chunks[chunk_id]
+                if self.page_manager and chunk.kv_cache_allocated:
+                    self.page_manager.free_for_chunk(chunk_id)
+                
                 del self._chunks[chunk_id]
                 return True
             return False
     
     def clear(self, chunk_type: Optional[ChunkType] = None) -> int:
         """
-        Clear chunks.
+        Clear chunks and free their KV cache pages.
         
         Args:
             chunk_type: If provided, only clear chunks of this type
@@ -179,6 +186,12 @@ class ChunkRegistry:
         """
         with self._lock:
             if chunk_type is None:
+                # Free all KV cache pages
+                if self.page_manager:
+                    for chunk_id, chunk in self._chunks.items():
+                        if chunk.kv_cache_allocated:
+                            self.page_manager.free_for_chunk(chunk_id)
+                
                 count = len(self._chunks)
                 self._chunks.clear()
                 return count
@@ -190,6 +203,9 @@ class ChunkRegistry:
             ]
             
             for chunk_id in to_delete:
+                chunk = self._chunks[chunk_id]
+                if self.page_manager and chunk.kv_cache_allocated:
+                    self.page_manager.free_for_chunk(chunk_id)
                 del self._chunks[chunk_id]
             
             return len(to_delete)
@@ -240,9 +256,14 @@ class ChunkRegistry:
             }
     
     def _evict_lru(self, count: int = 1) -> None:
-        """Evict least recently used chunks."""
+        """Evict least recently used chunks and free their KV cache."""
         for _ in range(min(count, len(self._chunks))):
             if self._chunks:
                 # Remove oldest (first) item
-                self._chunks.popitem(last=False)
+                chunk_id, chunk = self._chunks.popitem(last=False)
+                
+                # Free KV cache pages if allocated
+                if self.page_manager and chunk.kv_cache_allocated:
+                    self.page_manager.free_for_chunk(chunk_id)
+                
                 self.stats["evictions"] += 1

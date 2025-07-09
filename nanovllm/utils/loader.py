@@ -72,7 +72,16 @@ def load_model(model: nn.Module, model_name_or_path: str):
                     if k in weight_name:
                         v, shard_id = packed_modules_mapping[k]
                         param_name = weight_name.replace(k, v)
-                        param = model.get_parameter(param_name)
+                        try:
+                            param = model.get_parameter(param_name)
+                        except AttributeError as e:
+                            # If this is a bias parameter and the model doesn't have bias, skip it
+                            if param_name.endswith('.bias'):
+                                print(f"[INFO] Skipping bias parameter '{param_name}' as model has no bias")
+                                break
+                            print(f"[DEBUG] Failed to get parameter '{param_name}' from weight '{weight_name}'")
+                            print(f"[DEBUG] Error: {e}")
+                            raise
                         weight_loader = getattr(param, "weight_loader")
                         weight_loader(param, f.get_tensor(weight_name), shard_id)
                         break

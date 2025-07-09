@@ -17,15 +17,14 @@ class Config:
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
     
-    # Cascade attention configuration
-    enable_cascade_attention: bool = False
+    # Chunk configuration
     chunk_page_ratio: float = 0.5  # Fraction of pages reserved for chunks
-    max_cascade_levels: int = 3
     chunk_registry_size: int = 1000
     chunk_persistence_dir: str | None = None
     
-    # Custom kernel configuration
-    use_custom_kernels: bool = False
+    # Custom kernel configuration (deprecated - custom kernels are now always used)
+    use_custom_kernels: bool = True  # Always True now
+    use_custom_chunk_kernel: bool = True  # Always True now
 
     def __post_init__(self):
         # Check if it's a local directory first

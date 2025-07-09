@@ -29,6 +29,10 @@ class Sequence:
         self.ignore_eos = sampling_params.ignore_eos
         self.stop_token_ids = sampling_params.stop_token_ids or []
         self.retain_output_cache = sampling_params.retain_output_cache
+        
+        # For custom chunk attention
+        self.active_chunks = None
+        self.cascade_data = None
 
     def __len__(self):
         return self.num_tokens

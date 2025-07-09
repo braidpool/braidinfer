@@ -5,7 +5,6 @@ Manages page allocation and tracks page tables for sequences.
 
 from typing import List, Dict, Optional, Tuple, Any
 import torch
-import flashinfer
 from collections import deque
 
 from nanovllm.engine.sequence import Sequence
@@ -44,9 +43,17 @@ class PageManager:
         
         # Track current lengths for proper appending
         self.seq_lengths: Dict[int, int] = {}
+        
+        # Page tables for chunks (persistent allocations)
+        self.chunk_page_tables: Dict[str, List[int]] = {}
+        self.chunk_lengths: Dict[str, int] = {}
     
     def can_allocate(self, seq: Sequence) -> bool:
         """Check if we can allocate pages for a sequence."""
+        # If already allocated, return True
+        if seq.seq_id in self.seq_page_tables:
+            return True
+            
         # For prefill, allocate enough pages for the prompt
         # Plus some extra for generation
         estimated_final_len = len(seq) + seq.max_tokens
@@ -56,7 +63,8 @@ class PageManager:
     def allocate(self, seq: Sequence):
         """Allocate pages for a sequence."""
         if seq.seq_id in self.seq_page_tables:
-            raise ValueError(f"Sequence {seq.seq_id} already has allocated pages")
+            # Already allocated (e.g., for chunk-based generation)
+            return
         
         # Allocate pages for prompt + generation headroom
         estimated_final_len = len(seq) + seq.max_tokens
@@ -161,18 +169,25 @@ class PageManager:
             total_tokens = sum(seq_lens)
             
             # Validate K/V shapes
-            assert k.shape[0] == total_tokens, f"K shape mismatch: {k.shape[0]} != {total_tokens}"
+            # Note: K/V shapes should match the number of tokens we're appending
+            # which might be less than the total sequence length if using chunks
+            assert k.shape[0] == total_tokens, f"K shape mismatch: {k.shape[0]} != {total_tokens} (seq_lens={seq_lens})"
             assert v.shape[0] == total_tokens, f"V shape mismatch: {v.shape[0]} != {total_tokens}"
             
             # Build q_indptr for batch positions
             q_indptr = torch.tensor([0] + [sum(seq_lens[:i+1]) for i in range(len(sequences))],
                                    dtype=torch.int32, device="cuda")
             
-            batch_indices, positions = flashinfer.page.get_batch_indices_positions(
-                q_indptr,
-                torch.tensor(seq_lens, dtype=torch.int32, device="cuda"),
-                total_tokens
-            )
+            # Build batch indices and positions manually
+            # This replaces flashinfer.page.get_batch_indices_positions
+            batch_indices = []
+            positions = []
+            for seq_idx, seq_len in enumerate(seq_lens):
+                batch_indices.extend([seq_idx] * seq_len)
+                positions.extend(list(range(seq_len)))
+            
+            batch_indices = torch.tensor(batch_indices, dtype=torch.int32, device="cuda")
+            positions = torch.tensor(positions, dtype=torch.int32, device="cuda")
         else:
             # For decode, one token per sequence
             batch_size = len(sequences)
@@ -188,16 +203,44 @@ class PageManager:
         # Append to cache
         layer_cache = self.kv_cache[layer_idx]
         
-        flashinfer.page.append_paged_kv_cache(
-            k, v,
-            batch_indices,
-            positions,
-            layer_cache,
-            kv_indices,
-            kv_indptr,
-            last_page_lens,
-            kv_layout="HND"
-        )
+        # Always use custom KV cache implementation (FlashInfer removed)
+        from nanovllm.kernels.kv_cache_utils import append_to_paged_kv_cache_custom
+        
+        # Process each sequence separately for correctness
+        token_offset = 0
+        for seq_idx, seq in enumerate(sequences):
+            seq_len = len(seq) if is_prefill else 1
+            
+            # Get the KV indices for this sequence
+            start_idx = kv_indptr[seq_idx].item()
+            end_idx = kv_indptr[seq_idx + 1].item()
+            seq_kv_indices = kv_indices[start_idx:end_idx]
+            
+            # Get the tokens for this sequence
+            seq_k = k[token_offset:token_offset + seq_len]
+            seq_v = v[token_offset:token_offset + seq_len]
+            
+            # Get positions for this sequence - need to account for existing KV cache
+            current_kv_len = self.seq_lengths.get(seq.seq_id, 0)
+            if is_prefill:
+                # For prefill, positions start from current KV cache length
+                seq_positions = torch.arange(current_kv_len, current_kv_len + seq_len, dtype=torch.int32, device="cuda")
+            else:
+                # For decode, position is the current KV cache length
+                seq_positions = torch.tensor([current_kv_len], dtype=torch.int32, device="cuda")
+            
+            # Append for this sequence
+            append_to_paged_kv_cache_custom(
+                k=seq_k,
+                v=seq_v,
+                layer_cache=layer_cache,
+                kv_indices=seq_kv_indices,
+                positions=seq_positions,
+                page_size=self.page_size,
+                kv_layout="HND"
+            )
+            
+            token_offset += seq_len
         
         # Update sequence lengths only after all layers are processed
         # This is handled externally now
@@ -240,3 +283,99 @@ class PageManager:
         self.free_pages.extend(self.seq_page_tables[seq_id])
         del self.seq_page_tables[seq_id]
         del self.seq_lengths[seq_id]
+    
+    def allocate_for_chunk(self, chunk_id: str, num_tokens: int) -> List[int]:
+        """Allocate pages for a chunk's KV cache."""
+        if chunk_id in self.chunk_page_tables:
+            raise ValueError(f"Chunk {chunk_id} already has allocated pages")
+        
+        pages_needed = (num_tokens + self.page_size - 1) // self.page_size
+        
+        if len(self.free_pages) < pages_needed:
+            raise RuntimeError(f"Out of pages for chunk. Need {pages_needed}, have {len(self.free_pages)}")
+        
+        # Allocate pages
+        pages = []
+        for _ in range(pages_needed):
+            pages.append(self.free_pages.popleft())
+        
+        # Store mapping
+        self.chunk_page_tables[chunk_id] = pages
+        self.chunk_lengths[chunk_id] = num_tokens
+        
+        return pages
+    
+    def free_for_chunk(self, chunk_id: str) -> None:
+        """Free pages allocated to a chunk."""
+        if chunk_id not in self.chunk_page_tables:
+            return
+        
+        # Return pages to free pool
+        self.free_pages.extend(self.chunk_page_tables[chunk_id])
+        del self.chunk_page_tables[chunk_id]
+        
+        if chunk_id in self.chunk_lengths:
+            del self.chunk_lengths[chunk_id]
+    
+    def build_indices_for_chunk(self, chunk_id: str) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Build kv_indices, kv_indptr, and last_page_lens for a single chunk."""
+        if chunk_id not in self.chunk_page_tables:
+            raise ValueError(f"Chunk {chunk_id} has no allocated pages")
+        
+        pages = self.chunk_page_tables[chunk_id]
+        num_tokens = self.chunk_lengths[chunk_id]
+        
+        # All pages for this chunk
+        kv_indices = torch.tensor(pages, dtype=torch.int32, device="cuda")
+        kv_indptr = torch.tensor([0, len(pages)], dtype=torch.int32, device="cuda")
+        
+        # Last page length
+        if num_tokens == 0:
+            last_page_lens = torch.tensor([0], dtype=torch.int32, device="cuda")
+        else:
+            last_page_len = (num_tokens - 1) % self.page_size + 1
+            last_page_lens = torch.tensor([last_page_len], dtype=torch.int32, device="cuda")
+        
+        return kv_indices, kv_indptr, last_page_lens
+    
+    def append_kv_to_cache_for_chunk(self, layer_idx: int, k: torch.Tensor, v: torch.Tensor,
+                                   chunk_id: str, token_positions: torch.Tensor):
+        """Append K and V tensors to KV cache for a chunk."""
+        # Get chunk's page allocation
+        if chunk_id not in self.chunk_page_tables:
+            raise ValueError(f"Chunk {chunk_id} has no allocated pages")
+        
+        # Get indices for this chunk
+        kv_indices, kv_indptr, last_page_lens = self.build_indices_for_chunk(chunk_id)
+        
+        # For chunk prefilling, we treat the entire chunk as a single "sequence"
+        # Create batch indices - all zeros since we have one sequence
+        num_tokens = len(token_positions)
+        batch_indices = torch.zeros(num_tokens, dtype=torch.int32, device="cuda")
+        
+        # Positions should be 0-based for a new chunk
+        # This is important: positions are within-sequence positions, starting from 0
+        positions = torch.arange(num_tokens, dtype=torch.int32, device="cuda")
+        
+        # Append to cache
+        layer_cache = self.kv_cache[layer_idx]
+        
+        # Always use custom KV cache implementation (FlashInfer removed)
+        from nanovllm.kernels.kv_cache_utils import append_to_paged_kv_cache_custom
+        
+        # Debug output disabled for cleaner output
+        pass
+        
+        # Use custom append function
+        append_to_paged_kv_cache_custom(
+            k=k,
+            v=v,
+            layer_cache=layer_cache,
+            kv_indices=kv_indices,
+            positions=positions,
+            page_size=self.page_size,
+            kv_layout="HND"  # We use HND layout
+        )
+        
+        # Debug output disabled for cleaner output
+        pass

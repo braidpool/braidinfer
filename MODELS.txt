@@ -1,5 +1,16 @@
+4B Class models (4GB VRAM):
+----------------
+Qwen/Qwen3-4B
+google/gemma3-4B-it                     QAT may be needed here
 google/codegemma-7b-it
 meta-llama/Llama-3.1-8B
 mistralai/Mamba-Codestral-7B-v0.1       this may have a very different
                                         architecture (non-transformer)
 deepseek-ai/
+HuggingFaceTB/SmolM3-3B
+
+12B class models (8GB VRAM):
+-----------------
+Mistral NeMo
+Gemma3
+Phi4

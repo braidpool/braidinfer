@@ -12,7 +12,6 @@ from nanovllm.models.llama import LlamaForCausalLM
 from nanovllm.models.ernie import ERNIE45ForCausalLM
 from nanovllm.layers.sampler import Sampler
 from nanovllm.layers.attention import Attention
-from nanovllm.layers.flashinfer_cascade_attention import FlashInferCascadeAttention
 from nanovllm.utils.loader import load_model
 from nanovllm.engine.errors import ModelLoadError, MemoryError, ErrorContext
 
@@ -43,6 +42,8 @@ class ModelLoader:
                 if model_type in ["qwen3", "qwen2"]:
                     # Check if use_custom_kernels is specified in config
                     use_custom_kernels = getattr(config, 'use_custom_kernels', False)
+                    # Add custom chunk kernel flag to hf_config so model can access it
+                    hf_config.use_custom_chunk_kernel = getattr(config, 'use_custom_chunk_kernel', False)
                     model = Qwen3ForCausalLM(hf_config, use_custom_kernels=use_custom_kernels)
                 elif model_type == "gpt2":
                     model = GPT2ForCausalLM(hf_config)
@@ -54,12 +55,6 @@ class ModelLoader:
                     model = ERNIE45ForCausalLM(hf_config, use_custom_kernels=use_custom_kernels)
                 else:
                     raise ModelLoadError(f"Unsupported model type: {model_type}")
-                
-                # Set cascade attention flag on model layers if enabled
-                if getattr(config, 'enable_cascade_attention', False):
-                    for module in model.modules():
-                        if hasattr(module, 'attn'):
-                            module._use_cascade_attention = True
             except Exception as e:
                 raise ModelLoadError(f"Failed to create model instance: {str(e)}") from e
             
@@ -101,14 +96,20 @@ class ModelLoader:
         """
         layer_count = 0
         
-        for module in model.modules():
-            if isinstance(module, (Attention, FlashInferCascadeAttention)):
-                # Set KV cache reference
+        # Track which attention modules we've already set up to avoid double counting
+        seen_attention = set()
+        
+        for name, module in model.named_modules():
+            # Check for attention modules inside Qwen3AttentionFused first
+            if hasattr(module, 'attn') and isinstance(module.attn, Attention):
+                if id(module.attn) not in seen_attention:
+                    module.attn.kv_cache = page_manager.get_layer_kv_cache(layer_count)
+                    seen_attention.add(id(module.attn))
+                    layer_count += 1
+            # Only count standalone Attention modules that aren't already counted
+            elif isinstance(module, Attention) and id(module) not in seen_attention:
                 module.kv_cache = page_manager.get_layer_kv_cache(layer_count)
-                layer_count += 1
-            # Also check for attention modules inside Qwen3AttentionFused
-            elif hasattr(module, 'attn') and isinstance(module.attn, (Attention, FlashInferCascadeAttention)):
-                module.attn.kv_cache = page_manager.get_layer_kv_cache(layer_count)
+                seen_attention.add(id(module))
                 layer_count += 1
         
         return layer_count
