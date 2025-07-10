@@ -1,6 +1,6 @@
-# nano-vllm Examples
+# Braidinfer Examples
 
-This directory contains examples demonstrating various features of nano-vllm.
+This directory contains examples demonstrating various features of Braidinfer.
 
 ## Examples
 
@@ -78,7 +78,7 @@ Before running the examples, ensure you have:
    huggingface-cli download Qwen/Qwen3-0.6B --local-dir ~/huggingface/Qwen3-0.6B/
    ```
 
-2. **Installed nano-vllm**:
+2. **Installed Braidinfer**:
    ```bash
    pip install -e .
    ```

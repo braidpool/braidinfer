@@ -1,10 +1,10 @@
-# Architecture of nano-vllm
+# Architecture of Braidinfer
 
-This document provides a detailed overview of the internal architecture of `nano-vllm`, a high-performance, single-GPU LLM inference engine. The core design focuses on maximizing throughput and minimizing latency by optimizing memory access patterns and reducing kernel launch overhead, drawing inspiration from systems like vLLM and FlashInfer.
+This document provides a detailed overview of the internal architecture of `Braidinfer`, a high-performance, single-GPU LLM inference engine. The core design focuses on maximizing throughput and minimizing latency by optimizing memory access patterns and reducing kernel launch overhead, drawing inspiration from systems like vLLM and FlashInfer.
 
 ## 1. Core Philosophy: Chunk-Based Context Management
 
-The central architectural concept in `nano-vllm` is the **Chunk**. Instead of representing the prompt as a single, monolithic string of text, the context is broken down into logical, reusable pieces.
+The central architectural concept in `Braidinfer` is the **Chunk**. Instead of representing the prompt as a single, monolithic string of text, the context is broken down into logical, reusable pieces.
 
 - **Chunk Abstraction**: A `Chunk` is a semantic unit of text (e.g., a system prompt, a document, a user query) with its own pre-computed and cached Key-Value (KV) state.
 - **Dynamic Composition**: Inference requests are composed by referencing a set of chunks. The engine assembles these pieces on the fly at the attention level, avoiding costly string operations and re-computation.
@@ -14,7 +14,7 @@ This chunk-based approach is the foundation for the system's efficiency, particu
 
 ## 2. Paged KV Cache and Reuse
 
-To enable efficient chunk reuse, `nano-vllm` employs a paged KV cache, managed by the `PageManager`.
+To enable efficient chunk reuse, `Braidinfer` employs a paged KV cache, managed by the `PageManager`.
 
 - **Paged Memory**: The entire KV cache for all layers is pre-allocated as a single contiguous tensor, divided into fixed-size "pages". The layout is HND (Heads, Num Pages, Dims) for compatibility with high-performance kernels.
 - **Persistent Chunk Caching**: When a `Chunk` is registered, the `PageManager` allocates a set of pages to store its KV cache. This computation (prefill) happens only once. The pages remain allocated as long as the chunk is in use.
@@ -25,7 +25,7 @@ This architecture means that expensive computations for shared context (like a s
 
 ## 3. Fused Kernels for Performance
 
-A key optimization strategy in `nano-vllm` is the use of **fused kernels**, which combine multiple sequential operations into a single CUDA kernel launch. This reduces memory bandwidth usage and kernel launch overhead.
+A key optimization strategy in `Braidinfer` is the use of **fused kernels**, which combine multiple sequential operations into a single CUDA kernel launch. This reduces memory bandwidth usage and kernel launch overhead.
 
 The most important fused kernel is `fused_rmsnorm_qkv_mixed_precision`, which performs:
 1.  **RMSNorm**: Normalizes the input hidden state.
@@ -44,13 +44,13 @@ This specific order of operations ensures that the custom kernel produces bit-fo
 
 ## 4. Advanced Attention: Combining Chunks with Cascade Attention and Differential RoPE
 
-`nano-vllm`'s core innovation lies in how it combines chunked KV caches at the attention level. It uses a custom CUDA kernel, `paged_chunk_attention_kernel`, that implements two key algorithms: **Cascade Attention** (inspired by FlashInfer) for global normalization and **Differential RoPE** for correct positional awareness.
+`Braidinfer`'s core innovation lies in how it combines chunked KV caches at the attention level. It uses a custom CUDA kernel, `paged_chunk_attention_kernel`, that implements two key algorithms: **Cascade Attention** (inspired by FlashInfer) for global normalization and **Differential RoPE** for correct positional awareness.
 
 ### 4.1. Cascade Attention and Online Softmax
 
 When a query is performed against a set of chunks (e.g., a system prompt, a context document, and a user query), the attention mechanism must behave as if it were attending to a single, concatenated sequence. A naive implementation would be to physically copy the KV caches of the chunks into a contiguous block of memory, but this is inefficient.
 
-Instead, `nano-vllm` uses a **Cascade Attention** approach. The kernel iterates through the pages of each chunk sequentially but computes a single, globally normalized attention output using an **online softmax** algorithm.
+Instead, `Braidinfer` uses a **Cascade Attention** approach. The kernel iterates through the pages of each chunk sequentially but computes a single, globally normalized attention output using an **online softmax** algorithm.
 
 The standard softmax function is:
 `softmax(x_i) = exp(x_i) / sum(exp(x_j) for j in all_tokens)`
@@ -76,7 +76,7 @@ The second challenge is ensuring correct positional information. Rotary Position
 
 -   **The Problem**: A chunk's KV cache is computed with RoPE applied for its *local* positions. For example, a 100-token chunk is cached with positions 0 through 99. If this chunk is used as context starting at global position 500, its keys must be rotated as if they were at positions 500 through 599.
 
--   **The Solution**: `nano-vllm` uses **Differential RoPE**. RoPE rotation is a linear transformation that can be represented by a rotation matrix `R_m` for a position `m`. A key property of these matrices is that `R_{a+b} = R_a * R_b`.
+-   **The Solution**: `Braidinfer` uses **Differential RoPE**. RoPE rotation is a linear transformation that can be represented by a rotation matrix `R_m` for a position `m`. A key property of these matrices is that `R_{a+b} = R_a * R_b`.
 
 Let:
 -   `k_raw` be the key vector before any RoPE is applied.
@@ -111,7 +111,7 @@ When we combine them as `[Chunk A, Chunk B]`, the desired KV cache `KV_{A+B}` wo
 -   The `T_A` part computed with RoPE positions `0` to `L_A - 1`.
 -   The `T_B` part computed with RoPE positions `L_A` to `L_A + L_B - 1`.
 
-The `nano-vllm` kernel achieves this:
+The `Braidinfer` kernel achieves this:
 -   For keys from `Chunk A`, the `global_position` equals the `local_position`, so `delta = 0`. The rotation is an identity operation, and the cached keys are used as-is. This matches the first part of `KV_{A+B}`.
 -   For keys from `Chunk B`, the `global_position` is `L_A + local_position`. The `delta` is `L_A`. The kernel applies the `R_{L_A}` rotation to the cached keys from `Chunk B`, effectively shifting them to their correct global positions. This matches the second part of `KV_{A+B}`.
 

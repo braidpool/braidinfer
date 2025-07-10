@@ -140,7 +140,7 @@ The numerical differences we're seeing likely stem from:
 
 Llama.cpp's approach trades some memory bandwidth for numerical stability, which appears to be the right choice for transformer models.
 
-## Implementation Strategy for nano-vllm
+## Implementation Strategy for Braidinfer
 
 Based on this analysis, here's the recommended approach:
 

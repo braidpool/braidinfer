@@ -2,7 +2,7 @@
 
 ## Summary
 
-We successfully identified and fixed the major performance bottleneck in nano-vllm. The issue was excessive FlashInfer wrapper planning overhead, where `decode_wrapper.plan()` was being called for every token instead of being cached.
+We successfully identified and fixed the major performance bottleneck in Braidinfer. The issue was excessive FlashInfer wrapper planning overhead, where `decode_wrapper.plan()` was being called for every token instead of being cached.
 
 ## Key Findings
 

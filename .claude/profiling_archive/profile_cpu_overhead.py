@@ -7,7 +7,7 @@ import torch
 import cProfile
 import pstats
 from io import StringIO
-from nanovllm import LLM, SamplingParams
+from braidinfer import LLM, SamplingParams
 
 def profile_cpu_overhead():
     os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
@@ -82,7 +82,7 @@ def profile_cpu_overhead():
     num_iterations = 100
     
     # Create a request for timing
-    from nanovllm.engine.llm_request import LLMRequest
+    from braidinfer.engine.llm_request import LLMRequest
     request = LLMRequest(
         request_id="test",
         prompt="Test prompt",

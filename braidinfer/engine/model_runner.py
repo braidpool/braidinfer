@@ -5,13 +5,13 @@ Model runner for single-GPU nano-vllm.
 import torch
 from typing import List, Optional
 
-from nanovllm.config import Config
-from nanovllm.engine.sequence import Sequence
-from nanovllm.engine.inference_context import InferenceContext
-from nanovllm.engine.model_loader import ModelLoader
-from nanovllm.engine.errors import ErrorContext, handle_inference_error, InferenceError
-from nanovllm.engine.metrics import MetricsContext, get_metrics_collector
-from nanovllm.layers.sampler import Sampler
+from braidinfer.config import Config
+from braidinfer.engine.sequence import Sequence
+from braidinfer.engine.inference_context import InferenceContext
+from braidinfer.engine.model_loader import ModelLoader
+from braidinfer.engine.errors import ErrorContext, handle_inference_error, InferenceError
+from braidinfer.engine.metrics import MetricsContext, get_metrics_collector
+from braidinfer.layers.sampler import Sampler
 
 
 class ModelRunner:
@@ -82,8 +82,8 @@ class ModelRunner:
         
         # Set KV cache reference in all attention layers
         if page_manager:
-            from nanovllm.layers.attention import Attention
-            from nanovllm.engine.model_loader import ModelLoader
+            from braidinfer.layers.attention import Attention
+            from braidinfer.engine.model_loader import ModelLoader
             
             # Use ModelLoader's setup method to properly set KV cache for each layer
             ModelLoader.setup_attention_layers(self.model, page_manager)
@@ -265,8 +265,8 @@ class ModelRunner:
             chunk.cached_position_start = 0
         
         # Create a mock sequence for this chunk to use the standard prefill path
-        from nanovllm.engine.sequence import Sequence
-        from nanovllm.sampling_params import SamplingParams
+        from braidinfer.engine.sequence import Sequence
+        from braidinfer.sampling_params import SamplingParams
         
         # Create a dummy sequence with the chunk's tokens
         dummy_seq = Sequence(

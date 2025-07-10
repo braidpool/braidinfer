@@ -7,7 +7,7 @@ from typing import List, Dict, Optional, Tuple, Any
 import torch
 from collections import deque
 
-from nanovllm.engine.sequence import Sequence
+from braidinfer.engine.sequence import Sequence
 
 
 class PageManager:
@@ -219,7 +219,7 @@ class PageManager:
         layer_cache = self.kv_cache[layer_idx]
         
         # Always use custom KV cache implementation (FlashInfer removed)
-        from nanovllm.kernels.kv_cache_utils import append_to_paged_kv_cache_custom
+        from braidinfer.kernels.kv_cache_utils import append_to_paged_kv_cache_custom
         
         # Process each sequence separately for correctness
         token_offset = 0
@@ -376,7 +376,7 @@ class PageManager:
         layer_cache = self.kv_cache[layer_idx]
         
         # Always use custom KV cache implementation (FlashInfer removed)
-        from nanovllm.kernels.kv_cache_utils import append_to_paged_kv_cache_custom
+        from braidinfer.kernels.kv_cache_utils import append_to_paged_kv_cache_custom
         
         # Debug output disabled for cleaner output
         pass

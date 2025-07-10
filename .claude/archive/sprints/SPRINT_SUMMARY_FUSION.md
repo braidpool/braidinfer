@@ -2,7 +2,7 @@
 
 ## Achievement Summary
 
-Successfully implemented and tested a fused RMSNorm + QKV projection kernel for nano-vllm using Triton.
+Successfully implemented and tested a fused RMSNorm + QKV projection kernel for Braidinfer using Triton.
 
 ### Key Accomplishments
 

@@ -11,7 +11,7 @@ A lightweight vLLM implementation built from scratch.
 ## Installation
 
 ```bash
-pip install git+https://github.com/GeeeekExplorer/nano-vllm.git
+pip install git+https://github.com/GeeeekExplorer/Braidinfer.git
 ```
 
 ## Manual Download
@@ -140,4 +140,4 @@ The cascade attention feature provides memory savings for sequences with shared 
 
 ## Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=GeeeekExplorer/nano-vllm&type=Date)](https://www.star-history.com/#GeeeekExplorer/nano-vllm&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=GeeeekExplorer/Braidinfer&type=Date)](https://www.star-history.com/#GeeeekExplorer/Braidinfer&Date)

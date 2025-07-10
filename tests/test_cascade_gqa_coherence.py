@@ -8,8 +8,8 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nanovllm import LLM
-from nanovllm.config import Config
+from braidinfer import LLM
+from braidinfer.config import Config
 
 
 def test_cascade_coherence():

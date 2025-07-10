@@ -18,8 +18,8 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nanovllm.models.qwen3 import Qwen3ForCausalLM as CustomQwen3
-from nanovllm.models.qwen3_attention_separated import Qwen3AttentionSeparated
+from braidinfer.models.qwen3 import Qwen3ForCausalLM as CustomQwen3
+from braidinfer.models.qwen3_attention_separated import Qwen3AttentionSeparated
 
 
 class LayerOutputCollector:

@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-Basic usage example for nano-vllm.
+Basic usage example for Braidinfer.
 
-This example shows the simplest way to use nano-vllm for text generation.
+This example shows the simplest way to use Braidinfer for text generation.
 """
 
 import os
-from nanovllm import LLM, SamplingParams
+from braidinfer import LLM, SamplingParams
 
 
 def main():
     """Basic text generation example."""
-    print("=== Basic nano-vllm Usage ===\n")
+    print("=== Basic Braidinfer Usage ===\n")
     
     # Model path - adjust this to your model location
     model_path = os.path.expanduser("~/huggingface/Qwen3-0.6B/")

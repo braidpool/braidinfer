@@ -9,11 +9,11 @@ from typing import List, Optional, Tuple, Dict, Any
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
-from nanovllm.config import Config
-from nanovllm.sampling_params import SamplingParams
-from nanovllm.engine.sequence import Sequence, SequenceStatus
-from nanovllm.engine.scheduler import Scheduler
-from nanovllm.engine.model_runner import ModelRunner
+from braidinfer.config import Config
+from braidinfer.sampling_params import SamplingParams
+from braidinfer.engine.sequence import Sequence, SequenceStatus
+from braidinfer.engine.scheduler import Scheduler
+from braidinfer.engine.model_runner import ModelRunner
 
 
 class LLMEngine:
@@ -41,7 +41,7 @@ class LLMEngine:
         
         # Estimate KV cache blocks if not specified
         if config.num_kvcache_blocks == -1:
-            from nanovllm.engine.model_loader import ModelLoader
+            from braidinfer.engine.model_loader import ModelLoader
             config.num_kvcache_blocks = ModelLoader.calculate_kvcache_blocks(
                 config, config.hf_config, 1, config.kvcache_block_size
             )
@@ -506,7 +506,7 @@ class LLMEngine:
             all_token_ids.extend(generation_prompt_tokens)
         
         # Create a sequence that represents what needs to be processed
-        from nanovllm.engine.sequence import Sequence
+        from braidinfer.engine.sequence import Sequence
         
         # If we have no tokens at all, we can't generate
         if not all_token_ids:

@@ -9,7 +9,7 @@ savings and cache hit improvements.
 
 import os
 import time
-from nanovllm import ChunkedLLM, ChunkType
+from braidinfer import ChunkedLLM, ChunkType
 
 
 def simulate_conversation_branches():

@@ -1,28 +1,27 @@
 """
-LLaMA model implementation for nano-vllm.
-Supports TinyLlama and other LLaMA-based models.
+ERNIE-4.5 model implementation for nano-vllm.
 """
 
 import torch
 from torch import nn
-from transformers import LlamaConfig
+from transformers import PretrainedConfig
 
-from nanovllm.layers.activation import SiluAndMul
-from nanovllm.layers.attention import Attention
-from nanovllm.layers.layernorm import RMSNorm
-from nanovllm.layers.linear import QKVParallelLinear, MergedColumnParallelLinear, RowParallelLinear
-from nanovllm.layers.rotary_embedding import get_rope
-from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
-from nanovllm.kernels.fused_rmsnorm_qkv_minimal_f32 import FusedRMSNormQKVMinimalF32
+from braidinfer.layers.activation import SiluAndMul
+from braidinfer.layers.attention import Attention
+from braidinfer.layers.layernorm import RMSNorm
+from braidinfer.layers.linear import QKVParallelLinear, MergedColumnParallelLinear, RowParallelLinear
+from braidinfer.layers.rotary_embedding import get_rope
+from braidinfer.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
+from braidinfer.kernels.fused_rmsnorm_qkv_minimal_f32 import FusedRMSNormQKVMinimalF32
 
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from nanovllm.engine.inference_context import InferenceContext
+    from braidinfer.engine.inference_context import InferenceContext
 
 
-class LlamaAttention(nn.Module):
-    """LLaMA attention layer for FlashInfer."""
+class ERNIE45Attention(nn.Module):
+    """ERNIE-4.5 attention layer for FlashInfer."""
 
     def __init__(
         self,
@@ -30,9 +29,9 @@ class LlamaAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
-        max_position: int = 2048,
+        max_position: int = 131072,
         head_dim: int | None = None,
-        rope_theta: float = 10000.0,
+        rope_theta: float = 500000.0,
         rope_scaling: dict | None = None,
     ) -> None:
         super().__init__()
@@ -47,13 +46,13 @@ class LlamaAttention(nn.Module):
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
         
-        # No layer norm for Q/K in LLaMA (unlike Qwen3)
+        # No layer norm for Q/K in ERNIE (like LLaMA)
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
             self.head_dim,
             self.total_num_heads,
             self.total_num_kv_heads,
-            bias=False,  # LLaMA doesn't use bias
+            bias=False,  # ERNIE doesn't use bias
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
@@ -90,8 +89,8 @@ class LlamaAttention(nn.Module):
         return output
 
 
-class LlamaAttentionFused(nn.Module):
-    """LLaMA attention layer with fused RMSNorm+QKV kernel."""
+class ERNIE45AttentionFused(nn.Module):
+    """ERNIE-4.5 attention layer with fused RMSNorm+QKV kernel."""
 
     def __init__(
         self,
@@ -101,9 +100,9 @@ class LlamaAttentionFused(nn.Module):
         num_kv_heads: int,
         head_dim: int = None,
         rms_norm_eps: float = 1e-5,
-        rope_theta: float = 10000.0,
+        rope_theta: float = 500000.0,
         rope_scaling: dict = None,
-        max_position: int = 2048,
+        max_position: int = 131072,
         use_custom_chunk_kernel: bool = False,
     ):
         super().__init__()
@@ -232,8 +231,8 @@ class LlamaAttentionFused(nn.Module):
         return output
 
 
-class LlamaMLP(nn.Module):
-    """LLaMA MLP with SwiGLU activation."""
+class ERNIE45MLP(nn.Module):
+    """ERNIE-4.5 MLP with SwiGLU activation."""
 
     def __init__(
         self,
@@ -252,21 +251,21 @@ class LlamaMLP(nn.Module):
         return x
 
 
-class LlamaDecoderLayer(nn.Module):
-    """LLaMA decoder layer."""
+class ERNIE45DecoderLayer(nn.Module):
+    """ERNIE-4.5 decoder layer."""
 
-    def __init__(self, config: LlamaConfig, layer_idx: int, use_custom_kernels: bool = False):
+    def __init__(self, config: PretrainedConfig, layer_idx: int, use_custom_kernels: bool = False):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.use_custom_kernels = use_custom_kernels
-        rope_theta = getattr(config, "rope_theta", 10000.0)
+        rope_theta = getattr(config, "rope_theta", 500000.0)
         rope_scaling = getattr(config, "rope_scaling", None)
-        max_position_embeddings = getattr(config, "max_position_embeddings", 2048)
+        max_position_embeddings = getattr(config, "max_position_embeddings", 131072)
 
         if use_custom_kernels:
             # Use fused attention
             self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-            self.self_attn = LlamaAttentionFused(
+            self.self_attn = ERNIE45AttentionFused(
                 layer_idx=layer_idx,
                 hidden_size=config.hidden_size,
                 num_heads=config.num_attention_heads,
@@ -281,7 +280,7 @@ class LlamaDecoderLayer(nn.Module):
         else:
             # Use standard attention
             self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-            self.self_attn = LlamaAttention(
+            self.self_attn = ERNIE45Attention(
                 layer_idx=layer_idx,
                 hidden_size=config.hidden_size,
                 num_heads=config.num_attention_heads,
@@ -291,7 +290,7 @@ class LlamaDecoderLayer(nn.Module):
                 rope_scaling=rope_scaling,
                 max_position=max_position_embeddings,
             )
-        self.mlp = LlamaMLP(
+        self.mlp = ERNIE45MLP(
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
         )
@@ -322,16 +321,16 @@ class LlamaDecoderLayer(nn.Module):
         return hidden_states
 
 
-class LlamaModel(nn.Module):
-    """LLaMA model."""
+class ERNIE45Model(nn.Module):
+    """ERNIE-4.5 model."""
 
-    def __init__(self, config: LlamaConfig, use_custom_kernels: bool = False):
+    def __init__(self, config: PretrainedConfig, use_custom_kernels: bool = False):
         super().__init__()
         self.config = config
         self.use_custom_kernels = use_custom_kernels
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList(
-            [LlamaDecoderLayer(config, layer_idx, use_custom_kernels) 
+            [ERNIE45DecoderLayer(config, layer_idx, use_custom_kernels) 
              for layer_idx in range(config.num_hidden_layers)]
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -350,8 +349,8 @@ class LlamaModel(nn.Module):
         return hidden_states
 
 
-class LlamaForCausalLM(nn.Module):
-    """LLaMA model for causal language modeling."""
+class ERNIE45ForCausalLM(nn.Module):
+    """ERNIE-4.5 model for causal language modeling."""
     
     packed_modules_mapping = {
         "q_proj": ("qkv_proj", "q"),
@@ -361,11 +360,11 @@ class LlamaForCausalLM(nn.Module):
         "up_proj": ("gate_up_proj", 1),
     }
 
-    def __init__(self, config: LlamaConfig, use_custom_kernels: bool = False):
+    def __init__(self, config: PretrainedConfig, use_custom_kernels: bool = False):
         super().__init__()
         self.config = config
         self.use_custom_kernels = use_custom_kernels
-        self.model = LlamaModel(config, use_custom_kernels)
+        self.model = ERNIE45Model(config, use_custom_kernels)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size, bias=False)
     
     def forward(

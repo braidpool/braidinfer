@@ -6,16 +6,16 @@ import torch
 from torch import nn
 from transformers import GPT2Config
 
-from nanovllm.layers.activation import NewGELUActivation
-from nanovllm.layers.attention import Attention
-from nanovllm.layers.layernorm import LayerNorm
-from nanovllm.layers.linear import ColumnParallelLinear, RowParallelLinear
-from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
+from braidinfer.layers.activation import NewGELUActivation
+from braidinfer.layers.attention import Attention
+from braidinfer.layers.layernorm import LayerNorm
+from braidinfer.layers.linear import ColumnParallelLinear, RowParallelLinear
+from braidinfer.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
 
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from nanovllm.engine.inference_context import InferenceContext
+    from braidinfer.engine.inference_context import InferenceContext
 
 
 class GPT2Attention(nn.Module):

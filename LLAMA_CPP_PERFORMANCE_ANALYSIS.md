@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-The 400+ tok/s performance on Qwen3 models is achieved through **weight quantization**, not different numerical computation. Both llama.cpp and nano-vllm perform arithmetic operations in float16/float32 for numerical stability.
+The 400+ tok/s performance on Qwen3 models is achieved through **weight quantization**, not different numerical computation. Both llama.cpp and Braidinfer perform arithmetic operations in float16/float32 for numerical stability.
 
 ## Key Insights
 
@@ -20,8 +20,8 @@ Performance comparison (Qwen3-4B on RTX 5090):
 
 ### 2. Computation Precision
 
-**Both llama.cpp and nano-vllm do the same thing**:
-1. Load weights (quantized in llama.cpp, bfloat16 in nano-vllm)
+**Both llama.cpp and Braidinfer do the same thing**:
+1. Load weights (quantized in llama.cpp, bfloat16 in Braidinfer)
 2. Convert to float32 for accumulation
 3. Perform arithmetic in float16/float32
 4. Store results
@@ -35,7 +35,7 @@ Quantized weight (4-bit) → Dequantize to float → Compute in float → Result
 
 The extreme K normalization weights (96.5x) are handled correctly because:
 1. RMSNorm weights are **never quantized** - kept in full F16/F32 precision
-2. Arithmetic is done in float precision, same as nano-vllm
+2. Arithmetic is done in float precision, same as Braidinfer
 3. The numerical computation is essentially identical
 
 ### 4. Memory Bandwidth Analysis
@@ -53,7 +53,7 @@ Beyond quantization:
 - **CUDA Graphs**: Reduced kernel launch overhead (35% improvement)
 - **Kernel Fusion**: RMSNorm + QKV + RoPE in single kernel
 
-## Implications for nano-vllm
+## Implications for Braidinfer
 
 ### The Numerical Stability Issue is Separate
 
@@ -82,4 +82,4 @@ llama.cpp achieves 400+ tok/s through:
 - **Not** through different numerical computation
 - **Not** through lower precision arithmetic
 
-The numerical stability issue in nano-vllm's fused kernels is a separate problem that needs to be solved independently of performance optimization.
+The numerical stability issue in Braidinfer's fused kernels is a separate problem that needs to be solved independently of performance optimization.

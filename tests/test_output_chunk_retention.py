@@ -8,7 +8,7 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nanovllm import ChunkedLLM, ChunkType, SamplingParams
+from braidinfer import ChunkedLLM, ChunkType, SamplingParams
 
 
 class TestOutputChunkRetention(unittest.TestCase):

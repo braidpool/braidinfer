@@ -5,15 +5,15 @@ Model loading and initialization for nano-vllm.
 import torch
 from typing import Optional
 
-from nanovllm.config import Config
-from nanovllm.models.qwen3 import Qwen3ForCausalLM
-from nanovllm.models.gpt2 import GPT2ForCausalLM
-from nanovllm.models.llama import LlamaForCausalLM
-from nanovllm.models.ernie import ERNIE45ForCausalLM
-from nanovllm.layers.sampler import Sampler
-from nanovllm.layers.attention import Attention
-from nanovllm.utils.loader import load_model
-from nanovllm.engine.errors import ModelLoadError, MemoryError, ErrorContext
+from braidinfer.config import Config
+from braidinfer.models.qwen3 import Qwen3ForCausalLM
+from braidinfer.models.gpt2 import GPT2ForCausalLM
+from braidinfer.models.llama import LlamaForCausalLM
+from braidinfer.models.ernie import ERNIE45ForCausalLM
+from braidinfer.layers.sampler import Sampler
+from braidinfer.layers.attention import Attention
+from braidinfer.utils.loader import load_model
+from braidinfer.engine.errors import ModelLoadError, MemoryError, ErrorContext
 
 
 class ModelLoader:

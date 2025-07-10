@@ -9,8 +9,8 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nanovllm.kernels.qkv_rope_simple import QKVRoPESimple
-from nanovllm.layers.rotary_embedding import apply_rotary_emb
+from braidinfer.kernels.qkv_rope_simple import QKVRoPESimple
+from braidinfer.layers.rotary_embedding import apply_rotary_emb
 
 
 class TestQKVRoPEFixed(unittest.TestCase):

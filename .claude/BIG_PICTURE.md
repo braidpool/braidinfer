@@ -1,7 +1,7 @@
-# BIG_PICTURE.md - nano-vllm-claude-flash-attn
+# BIG_PICTURE.md - Braidinfer-claude-flash-attn
 
 ## Project Overview
-This is nano-vllm, a single-GPU optimized implementation of vLLM focused on high-performance local LLM inference using FlashInfer for cascade attention.
+This is Braidinfer, a single-GPU optimized implementation of vLLM focused on high-performance local LLM inference using FlashInfer for cascade attention.
 
 ## Current State
 - **Architecture**: Single-GPU focused, removed distributed infrastructure

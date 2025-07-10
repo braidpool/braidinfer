@@ -1,6 +1,6 @@
 # NanoVLLM Benchmark Suite
 
-This directory contains benchmarking scripts for evaluating different KV cache configurations in nano-vllm.
+This directory contains benchmarking scripts for evaluating different KV cache configurations in Braidinfer.
 
 ## Overview
 
@@ -77,7 +77,7 @@ This helps prevent OOM errors and ensures more consistent results.
    huggingface-cli download Qwen/Qwen3-0.6B --local-dir ~/huggingface/Qwen3-0.6B/
    ```
 
-2. Ensure nano-vllm is installed:
+2. Ensure Braidinfer is installed:
    ```bash
    pip install -e ..
    ```

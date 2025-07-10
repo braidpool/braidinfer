@@ -4,7 +4,7 @@
 import os
 import time
 import torch
-from nanovllm import LLM, SamplingParams
+from braidinfer import LLM, SamplingParams
 
 def profile_model_layers():
     os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
@@ -25,7 +25,7 @@ def profile_model_layers():
     llm.generate(["Hello"], SamplingParams(max_tokens=5, temperature=0.0))
     
     # Get a sequence for testing
-    from nanovllm.engine.sequence import Sequence
+    from braidinfer.engine.sequence import Sequence
     test_seq = Sequence([1, 2, 3, 4, 5], SamplingParams(max_tokens=1))
     for i in range(10):
         test_seq.append_token(100 + i)
@@ -48,7 +48,7 @@ def profile_model_layers():
     print(f"Embeddings: {embed_time:.3f} ms")
     
     # 2. Create context
-    from nanovllm.engine.inference_context import InferenceContext
+    from braidinfer.engine.inference_context import InferenceContext
     context = InferenceContext(
         sequences=sequences,
         page_manager=llm.model_runner.page_manager,

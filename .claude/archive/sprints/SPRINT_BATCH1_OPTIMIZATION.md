@@ -1,7 +1,7 @@
 # Sprint: Batch Size 1 Optimization
 
 ## Goal
-Optimize nano-vllm for single-user scenarios where batch size 1 is the primary use case. Target: Get as close as possible to the theoretical FlashInfer maximum of ~1237 tokens/s.
+Optimize Braidinfer for single-user scenarios where batch size 1 is the primary use case. Target: Get as close as possible to the theoretical FlashInfer maximum of ~1237 tokens/s.
 
 ## Current Performance Gap Analysis
 

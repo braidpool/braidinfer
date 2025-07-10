@@ -275,7 +275,7 @@ __device__ float compute_attention_score(
 1. Fuse entire decoder layers
 2. Optimize memory layout
 3. Tune for specific GPU (A100/H100)
-4. Integration with nano-vllm
+4. Integration with Braidinfer
 
 ## Advantages Over CUDA Graphs
 

@@ -10,7 +10,7 @@ import sys
 import time
 from typing import List, Optional, Tuple
 
-from nanovllm import LLM, SamplingParams
+from braidinfer import LLM, SamplingParams
 
 
 class FastChat:

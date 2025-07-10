@@ -14,9 +14,9 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nanovllm.kernels.rmsnorm_f32 import RMSNormF32
-from nanovllm.kernels.qkv_rope_simple import QKVRoPESimple
-from nanovllm.layers.layernorm import RMSNorm
+from braidinfer.kernels.rmsnorm_f32 import RMSNormF32
+from braidinfer.kernels.qkv_rope_simple import QKVRoPESimple
+from braidinfer.layers.layernorm import RMSNorm
 
 
 class TestSprintEdgeCases(unittest.TestCase):

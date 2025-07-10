@@ -5,7 +5,7 @@ import os
 import time
 import torch
 import torch.utils.benchmark as benchmark
-from nanovllm import LLM, SamplingParams
+from braidinfer import LLM, SamplingParams
 
 def trace_cpu_overhead():
     os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
@@ -81,7 +81,7 @@ def trace_cpu_overhead():
     print("\n4. Benchmarking single forward pass")
     
     # Get test inputs
-    from nanovllm.engine.sequence import Sequence
+    from braidinfer.engine.sequence import Sequence
     test_seq = Sequence([1, 2, 3, 4, 5], SamplingParams(max_tokens=1))
     for i in range(10):
         test_seq.append_token(100 + i)
@@ -91,7 +91,7 @@ def trace_cpu_overhead():
     input_ids, positions = llm.model_runner.prepare_decode(sequences)
     
     # Create context
-    from nanovllm.engine.inference_context import InferenceContext
+    from braidinfer.engine.inference_context import InferenceContext
     context = InferenceContext(
         sequences=sequences,
         page_manager=llm.model_runner.page_manager,

@@ -3,7 +3,7 @@
 
 import os
 import torch
-from nanovllm import LLM
+from braidinfer import LLM
 
 model_path = os.path.expanduser('~/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/e6de91484c29aa9480d55605af694f39b081c455/')
 

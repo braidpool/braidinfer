@@ -1,4 +1,4 @@
-# ROADMAP.md - nano-vllm Development Roadmap
+# ROADMAP.md - Braidinfer Development Roadmap
 
 ## Completed Sprints
 - [x] Remove distributed infrastructure for single-GPU focus

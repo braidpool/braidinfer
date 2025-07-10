@@ -2,7 +2,7 @@
 
 ## Problem
 
-The fused RMSNorm+QKV kernels in nano-vllm were producing gibberish output with Qwen3 models due to numerical precision issues. The problem was caused by:
+The fused RMSNorm+QKV kernels in Braidinfer were producing gibberish output with Qwen3 models due to numerical precision issues. The problem was caused by:
 
 1. **Different bfloat16 conversion points** between PyTorch and the fused kernel
 2. **96.5x amplification** from Qwen3's extreme K normalization weights

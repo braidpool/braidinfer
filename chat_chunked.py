@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Fast chat interface using nano-vllm with ChunkedLLM API for context reuse.
+Fast chat interface using Braidinfer with ChunkedLLM API for context reuse.
 Provides real-time streaming output with conversation chunk management.
 """
 
@@ -10,7 +10,7 @@ import sys
 import time
 from typing import List, Optional, Tuple, Dict, Any
 
-from nanovllm import ChunkedLLM, ChunkType, SamplingParams
+from braidinfer import ChunkedLLM, ChunkType, SamplingParams
 
 
 class ChunkedFastChat:
@@ -291,7 +291,7 @@ class ChunkedFastChat:
     
     def run(self):
         """Run the chat REPL loop."""
-        print("Fast Chat Interface with ChunkedLLM (nano-vllm)")
+        print("Fast Chat Interface with ChunkedLLM (Braidinfer)")
         print("=============================================")
         print("Commands:")
         print("  'exit' or Ctrl+C - quit")
@@ -351,7 +351,7 @@ class ChunkedFastChat:
 def main():
     """Main entry point."""
     parser = argparse.ArgumentParser(
-        description="Fast chat interface with nano-vllm ChunkedLLM API",
+        description="Fast chat interface with Braidinfer ChunkedLLM API",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:

@@ -10,8 +10,8 @@ import torch.nn.functional as F
 from typing import List, Optional, Tuple, Dict
 from dataclasses import dataclass
 
-from nanovllm.chunks import Chunk
-from nanovllm.layers.rotary_embedding import apply_rotary_emb
+from braidinfer.chunks import Chunk
+from braidinfer.layers.rotary_embedding import apply_rotary_emb
 
 
 @dataclass

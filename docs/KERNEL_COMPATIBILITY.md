@@ -2,25 +2,25 @@
 
 ## Overview
 
-Some models are incompatible with fused kernels due to extreme weight values that amplify small numerical differences. This guide explains how to check if your model is compatible with nano-vllm's optimized kernels.
+Some models are incompatible with fused kernels due to extreme weight values that amplify small numerical differences. This guide explains how to check if your model is compatible with Braidinfer's optimized kernels.
 
 ## Quick Start
 
 Check your model's compatibility:
 
 ```bash
-python -m nanovllm.utils.check_compatibility_cli <model_path>
+python -m braidinfer.utils.check_compatibility_cli <model_path>
 ```
 
 Example:
 ```bash
-python -m nanovllm.utils.check_compatibility_cli ~/models/qwen3-0.6b
+python -m braidinfer.utils.check_compatibility_cli ~/models/qwen3-0.6b
 
 # With detailed analysis
-python -m nanovllm.utils.check_compatibility_cli ~/models/qwen3-0.6b --verbose
+python -m braidinfer.utils.check_compatibility_cli ~/models/qwen3-0.6b --verbose
 
 # Export report
-python -m nanovllm.utils.check_compatibility_cli ~/models/qwen3-0.6b --export report.txt
+python -m braidinfer.utils.check_compatibility_cli ~/models/qwen3-0.6b --export report.txt
 ```
 
 ## Understanding Compatibility

@@ -5,7 +5,7 @@ import os
 import time
 import torch
 import flashinfer
-from nanovllm import LLM, SamplingParams
+from braidinfer import LLM, SamplingParams
 
 def profile_flashinfer_decode():
     os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'

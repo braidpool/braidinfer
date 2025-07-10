@@ -4,7 +4,7 @@ Simple example of using the ChunkedLLM API.
 """
 
 import os
-from nanovllm import ChunkedLLM, ChunkType
+from braidinfer import ChunkedLLM, ChunkType
 
 
 def main():

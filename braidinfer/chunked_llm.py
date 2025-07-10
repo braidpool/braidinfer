@@ -7,9 +7,9 @@ import time
 from typing import Dict, List, Optional, Any, Union
 import torch
 
-from nanovllm import LLM, SamplingParams
-from nanovllm.chunks import Chunk, ChunkType, ChunkNotFoundError, InvalidCompositionError
-from nanovllm.chunk_registry import ChunkRegistry
+from braidinfer import LLM, SamplingParams
+from braidinfer.chunks import Chunk, ChunkType, ChunkNotFoundError, InvalidCompositionError
+from braidinfer.chunk_registry import ChunkRegistry
 from transformers import AutoTokenizer
 
 

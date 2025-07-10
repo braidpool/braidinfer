@@ -8,7 +8,7 @@ requests, providing both memory savings and performance benefits.
 """
 
 import os
-from nanovllm import ChunkedLLM, ChunkType
+from braidinfer import ChunkedLLM, ChunkType
 
 
 def demonstrate_cascade_with_chunks():

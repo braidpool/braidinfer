@@ -31,7 +31,7 @@ Qwen3's K normalization weights go up to **96.5**, which:
 
 They achieve 400+ tok/s through **quantization**, not different computation:
 - Weights stored in 4-bit format (4x memory bandwidth reduction)
-- Arithmetic still done in float16/float32 like nano-vllm
+- Arithmetic still done in float16/float32 like Braidinfer
 - RMSNorm weights are **never quantized** - kept in full precision
 
 ## Solutions

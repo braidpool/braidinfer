@@ -8,7 +8,7 @@ import torch.nn.functional as F
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from nanovllm.engine.inference_context import InferenceContext
+    from braidinfer.engine.inference_context import InferenceContext
 
 
 class VocabParallelEmbedding(nn.Module):

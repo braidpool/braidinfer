@@ -11,10 +11,10 @@ import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nanovllm.kernels.rmsnorm_f32 import RMSNormF32
-from nanovllm.kernels.fused_rmsnorm_qkv_minimal_f32 import FusedRMSNormQKVMinimalF32
-from nanovllm.kernels.fused_rmsnorm_qkv_with_bias import FusedRMSNormQKVWithBias
-from nanovllm.layers.layernorm import RMSNorm
+from braidinfer.kernels.rmsnorm_f32 import RMSNormF32
+from braidinfer.kernels.fused_rmsnorm_qkv_minimal_f32 import FusedRMSNormQKVMinimalF32
+from braidinfer.kernels.fused_rmsnorm_qkv_with_bias import FusedRMSNormQKVWithBias
+from braidinfer.layers.layernorm import RMSNorm
 
 
 class TestNumericalStability(unittest.TestCase):

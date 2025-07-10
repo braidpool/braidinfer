@@ -2,7 +2,7 @@
 
 ## Overview
 
-Plan to integrate the fused RMSNorm + QKV kernel into nano-vllm's model layers for production use.
+Plan to integrate the fused RMSNorm + QKV kernel into Braidinfer's model layers for production use.
 
 ## Phase 1: Model Layer Integration (2-3 days)
 

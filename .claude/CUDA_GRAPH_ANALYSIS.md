@@ -1,4 +1,4 @@
-# CUDA Graph Analysis for nano-vllm
+# CUDA Graph Analysis for Braidinfer
 
 ## Why CUDA Graphs?
 

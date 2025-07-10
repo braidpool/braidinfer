@@ -14,8 +14,8 @@ from pathlib import Path
 import torch
 from transformers import AutoConfig
 
-from nanovllm import LLM
-from nanovllm.utils.kernel_compatibility import (
+from braidinfer import LLM
+from braidinfer.utils.kernel_compatibility import (
     FusedKernelCompatibilityChecker,
     generate_compatibility_report
 )

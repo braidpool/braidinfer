@@ -13,13 +13,13 @@ Modern transformer models have many small but critical details. Missing even one
 
 ## Action Plan for All Interns
 
-Both the `nano-vllm` and `dynamic_kv_cache` projects are likely suffering from one or both of these issues. Here is a clear, actionable plan to resolve them.
+Both the `Braidinfer` and `dynamic_kv_cache` projects are likely suffering from one or both of these issues. Here is a clear, actionable plan to resolve them.
 
 ### Step 1: Fix the Embedding Scaling (High-Impact)
 
 This is the most likely cause of the ~10x norm difference reported by the `dynamic_kv_cache` intern.
 
-*   **Action:** In your embedding lookup function (e.g., `embedding_lookup` in `huggingface_model.cu` or the equivalent in `nano-vllm`), after you have retrieved the embedding vectors from the weight matrix, you **must** scale them.
+*   **Action:** In your embedding lookup function (e.g., `embedding_lookup` in `huggingface_model.cu` or the equivalent in `Braidinfer`), after you have retrieved the embedding vectors from the weight matrix, you **must** scale them.
 
     *   Add a simple CUDA kernel that multiplies each element of the embedding tensor by `1.0f / sqrtf(hidden_size)`.
     *   The `hidden_size` for Qwen3-0.6B is `1024`, so you will be scaling by `1.0f / 32.0f = 0.03125`.

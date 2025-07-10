@@ -22,8 +22,8 @@ from rich.align import Align
 from rich.rule import Rule
 from rich import box
 
-from nanovllm import ChunkedLLM, ChunkType
-from nanovllm.sampling_params import SamplingParams
+from braidinfer import ChunkedLLM, ChunkType
+from braidinfer.sampling_params import SamplingParams
 
 
 @dataclass

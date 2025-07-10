@@ -14,8 +14,8 @@ import json
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nanovllm.models.qwen3 import Qwen3ForCausalLM, Qwen3AttentionFused
-from nanovllm.kernels.fused_rmsnorm_qkv_with_bias import FusedRMSNormQKVWithBias
+from braidinfer.models.qwen3 import Qwen3ForCausalLM, Qwen3AttentionFused
+from braidinfer.kernels.fused_rmsnorm_qkv_with_bias import FusedRMSNormQKVWithBias
 from transformers import Qwen3Config
 
 

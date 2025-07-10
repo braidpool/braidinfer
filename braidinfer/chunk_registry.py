@@ -8,7 +8,7 @@ from collections import OrderedDict
 from typing import Dict, List, Optional, Set, Any
 from datetime import datetime
 
-from nanovllm.chunks import Chunk, ChunkType, ChunkNotFoundError
+from braidinfer.chunks import Chunk, ChunkType, ChunkNotFoundError
 
 
 class ChunkRegistry:

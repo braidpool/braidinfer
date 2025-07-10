@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-nano-vllm achieves **~29 tokens/second** at batch size 1 on Qwen3-0.6B. Custom Triton kernels made performance worse. The previously claimed 230 tok/s was incorrect.
+Braidinfer achieves **~29 tokens/second** at batch size 1 on Qwen3-0.6B. Custom Triton kernels made performance worse. The previously claimed 230 tok/s was incorrect.
 
 ## Actual Performance Numbers
 
@@ -124,6 +124,6 @@ nano-vllm achieves **~29 tokens/second** at batch size 1 on Qwen3-0.6B. Custom T
 
 ## Conclusion
 
-nano-vllm performs reasonably well at **29 tok/s** for single-user inference. This is competitive for a full-precision Qwen3-0.6B model. The custom kernel attempts failed, but the system architecture is sound. Focus should shift to proven optimization techniques like quantization rather than custom kernel development.
+Braidinfer performs reasonably well at **29 tok/s** for single-user inference. This is competitive for a full-precision Qwen3-0.6B model. The custom kernel attempts failed, but the system architecture is sound. Focus should shift to proven optimization techniques like quantization rather than custom kernel development.
 
 The 500+ tok/s target was unrealistic from the start. A more reasonable target is 100-150 tok/s with quantization and system optimizations.

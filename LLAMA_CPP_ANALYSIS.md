@@ -93,7 +93,7 @@ Their 400+ tok/s likely comes from:
 4. **Integer Operations** (DP4A for quantized dot products)
 5. **Adaptive Algorithms** (different kernels for different sizes)
 
-## Recommendations for nano-vllm
+## Recommendations for Braidinfer
 
 1. **Fix RMSNorm**: Apply weight after normalization, not during
 2. **Add Quantization**: Implement Q4_0/Q8_0 support for memory-bound ops

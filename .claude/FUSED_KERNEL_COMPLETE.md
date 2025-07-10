@@ -120,4 +120,4 @@ The kernel has been thoroughly tested:
 
 ## Conclusion
 
-This implementation proves that custom CUDA kernels via Triton can provide meaningful performance improvements for nano-vllm. The kernel is not a placeholder - it contains complete, working Triton logic that successfully fuses multiple operations and achieves real speedups.
+This implementation proves that custom CUDA kernels via Triton can provide meaningful performance improvements for Braidinfer. The kernel is not a placeholder - it contains complete, working Triton logic that successfully fuses multiple operations and achieves real speedups.

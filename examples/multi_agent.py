@@ -10,7 +10,7 @@ system prompts.
 
 import os
 from typing import Dict, List
-from nanovllm import ChunkedLLM, ChunkType
+from braidinfer import ChunkedLLM, ChunkType
 
 
 class Agent:

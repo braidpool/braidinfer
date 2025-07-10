@@ -1,10 +1,10 @@
-# Precision Analysis Summary: llama.cpp vs nano-vllm
+# Precision Analysis Summary: llama.cpp vs Braidinfer
 
 ## Key Findings
 
 ### 1. RMSNorm Implementation
 Both implementations correctly apply weight AFTER normalization:
-- **nano-vllm**: `(input / rms) * weight` ✓
+- **Braidinfer**: `(input / rms) * weight` ✓
 - **llama.cpp**: `(input / rms) * weight` ✓
 
 The numerical order is correct in both cases.
@@ -17,7 +17,7 @@ The numerical order is correct in both cases.
 - Quantization (INT4/INT8) for weights to reduce memory bandwidth
 - Mixed precision carefully applied where needed
 
-**nano-vllm approach:**
+**Braidinfer approach:**
 - Similar float32 accumulation for RMS
 - Float32 for entire normalization operation when K norm weights are extreme
 - No quantization support yet

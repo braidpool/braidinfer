@@ -27,7 +27,7 @@ The previous performance improvements (31 tok/s → 237 tok/s) came from:
 - NOT from custom kernels
 
 ### Streaming Implementation
-Successfully added streaming support to nano-vllm:
+Successfully added streaming support to Braidinfer:
 - Real-time token generation
 - Minimal overhead
 - Good user experience

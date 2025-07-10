@@ -8,12 +8,12 @@ import torch
 import logging
 from typing import Optional
 
-from nanovllm.config import Config
-from nanovllm.models.qwen3 import Qwen3ForCausalLM
-from nanovllm.models.gpt2 import GPT2ForCausalLM
-from nanovllm.layers.sampler import Sampler
-from nanovllm.utils.kernel_compatibility import check_model_compatibility
-from nanovllm.engine.model_loader import ModelLoader as BaseModelLoader
+from braidinfer.config import Config
+from braidinfer.models.qwen3 import Qwen3ForCausalLM
+from braidinfer.models.gpt2 import GPT2ForCausalLM
+from braidinfer.layers.sampler import Sampler
+from braidinfer.utils.kernel_compatibility import check_model_compatibility
+from braidinfer.engine.model_loader import ModelLoader as BaseModelLoader
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +97,7 @@ class ModelLoaderWithCompatibility(BaseModelLoader):
 # Example of how to patch the existing ModelLoader
 def patch_model_loader():
     """Patch the existing ModelLoader to add compatibility checking."""
-    import nanovllm.engine.model_loader as model_loader_module
+    import braidinfer.engine.model_loader as model_loader_module
     
     # Store original
     original_load_model = model_loader_module.ModelLoader.load_model

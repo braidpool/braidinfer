@@ -1,4 +1,4 @@
-# Bottleneck Analysis - nano-vllm @ 230 tok/s
+# Bottleneck Analysis - Braidinfer @ 230 tok/s
 
 ## Executive Summary
 

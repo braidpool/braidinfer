@@ -6,20 +6,20 @@ import torch
 from torch import nn
 from transformers import Qwen3Config
 
-from nanovllm.layers.activation import SiluAndMul
-from nanovllm.layers.attention import Attention
-from nanovllm.layers.layernorm import RMSNorm
-from nanovllm.layers.linear import QKVParallelLinear, MergedColumnParallelLinear, RowParallelLinear
-from nanovllm.layers.rotary_embedding import get_rope
-from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
-from nanovllm.kernels.fused_rmsnorm_qkv_production import FusedRMSNormQKV
-from nanovllm.kernels.fused_rmsnorm_qkv_minimal_f32 import FusedRMSNormQKVMinimalF32
+from braidinfer.layers.activation import SiluAndMul
+from braidinfer.layers.attention import Attention
+from braidinfer.layers.layernorm import RMSNorm
+from braidinfer.layers.linear import QKVParallelLinear, MergedColumnParallelLinear, RowParallelLinear
+from braidinfer.layers.rotary_embedding import get_rope
+from braidinfer.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
+from braidinfer.kernels.fused_rmsnorm_qkv_production import FusedRMSNormQKV
+from braidinfer.kernels.fused_rmsnorm_qkv_minimal_f32 import FusedRMSNormQKVMinimalF32
 
 
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from nanovllm.engine.inference_context import InferenceContext
+    from braidinfer.engine.inference_context import InferenceContext
 
 
 class Qwen3Attention(nn.Module):
@@ -93,7 +93,7 @@ class Qwen3Attention(nn.Module):
     ) -> torch.Tensor:
         if self.use_fused_qkv and layernorm_weight is not None:
             # Use fused kernel
-            from nanovllm.kernels.fused_rmsnorm_qkv_mixed_precision import FusedRMSNormQKVMixedPrecision
+            from braidinfer.kernels.fused_rmsnorm_qkv_mixed_precision import FusedRMSNormQKVMixedPrecision
             
             # Ensure 2D input
             orig_shape = hidden_states.shape
@@ -196,7 +196,7 @@ class Qwen3AttentionFused(nn.Module):
         
         # Always create standard attention module for prefill
         # Custom chunk kernel is used automatically when active_chunks present
-        from nanovllm.layers.attention import Attention
+        from braidinfer.layers.attention import Attention
         
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
@@ -245,7 +245,7 @@ class Qwen3AttentionFused(nn.Module):
             raise ValueError("layernorm_weight must be provided for fused kernel")
         
         # Use the mixed precision fused kernel
-        from nanovllm.kernels.fused_rmsnorm_qkv_mixed_precision import FusedRMSNormQKVMixedPrecision
+        from braidinfer.kernels.fused_rmsnorm_qkv_mixed_precision import FusedRMSNormQKVMixedPrecision
         
         q, k, v = FusedRMSNormQKVMixedPrecision.forward(
             hidden_states,
@@ -347,7 +347,7 @@ class Qwen3AttentionFused(nn.Module):
         # Output projection
         if self.use_fused_output and residual is not None:
             # Use fused output projection + residual
-            from nanovllm.kernels.fused_attention_output import FusedAttentionOutput
+            from braidinfer.kernels.fused_attention_output import FusedAttentionOutput
             
             # Reshape attn_output if needed
             attn_shape = attn_output.shape

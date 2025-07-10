@@ -6,10 +6,10 @@ from dataclasses import dataclass
 from typing import List, Optional, TYPE_CHECKING
 import torch
 
-from nanovllm.engine.sequence import Sequence
+from braidinfer.engine.sequence import Sequence
 
 if TYPE_CHECKING:
-    from nanovllm.chunks import Chunk
+    from braidinfer.chunks import Chunk
 
 
 

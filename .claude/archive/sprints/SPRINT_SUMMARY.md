@@ -1,7 +1,7 @@
 # Sprint Summary: Batch Size 1 Optimization
 
 ## Sprint Goal
-Optimize nano-vllm for single-user scenarios to achieve >500 tokens/s at batch size 1
+Optimize Braidinfer for single-user scenarios to achieve >500 tokens/s at batch size 1
 
 ## What Was Accomplished
 

@@ -1,8 +1,8 @@
 from collections import deque
 
-from nanovllm.config import Config
-from nanovllm.engine.sequence import Sequence, SequenceStatus
-from nanovllm.engine.page_manager import PageManager
+from braidinfer.config import Config
+from braidinfer.engine.sequence import Sequence, SequenceStatus
+from braidinfer.engine.page_manager import PageManager
 
 
 class Scheduler:

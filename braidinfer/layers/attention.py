@@ -8,9 +8,9 @@ import torch.nn.functional as F
 from typing import TYPE_CHECKING, Optional, List, Tuple
 
 if TYPE_CHECKING:
-    from nanovllm.engine.inference_context import InferenceContext
-    from nanovllm.engine.sequence import Sequence
-    from nanovllm.engine.page_manager import PageManager
+    from braidinfer.engine.inference_context import InferenceContext
+    from braidinfer.engine.sequence import Sequence
+    from braidinfer.engine.page_manager import PageManager
 
 from .cascade_attention import CascadeAttention
 

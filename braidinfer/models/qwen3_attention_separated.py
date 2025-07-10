@@ -11,14 +11,14 @@ import torch
 import torch.nn as nn
 from typing import Optional, TYPE_CHECKING
 
-from nanovllm.layers.layernorm import RMSNorm
-from nanovllm.layers.linear import QKVParallelLinear
-from nanovllm.layers.rotary_embedding import get_rope
-from nanovllm.kernels.rmsnorm_f32 import RMSNormF32
-from nanovllm.kernels.qkv_rope_simple import QKVRoPESimple
+from braidinfer.layers.layernorm import RMSNorm
+from braidinfer.layers.linear import QKVParallelLinear
+from braidinfer.layers.rotary_embedding import get_rope
+from braidinfer.kernels.rmsnorm_f32 import RMSNormF32
+from braidinfer.kernels.qkv_rope_simple import QKVRoPESimple
 
 if TYPE_CHECKING:
-    from nanovllm.core import CacheContext
+    from braidinfer.core import CacheContext
 
 
 class Qwen3AttentionSeparated(nn.Module):
