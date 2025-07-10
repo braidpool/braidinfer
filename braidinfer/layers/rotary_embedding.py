@@ -8,12 +8,20 @@ def apply_rotary_emb(
     cos: torch.Tensor,
     sin: torch.Tensor,
 ) -> torch.Tensor:
-    cos = cos.unsqueeze(-2)
-    sin = sin.unsqueeze(-2)
-    x1, x2 = torch.chunk(x.to(torch.float32), 2, dim=-1)
+    # Store original dtype for conversion back
+    original_dtype = x.dtype
+    
+    # Convert everything to float32 for precision
+    cos = cos.unsqueeze(-2).to(torch.float32)
+    sin = sin.unsqueeze(-2).to(torch.float32)
+    x_f32 = x.to(torch.float32)
+    
+    x1, x2 = torch.chunk(x_f32, 2, dim=-1)
     y1 = x1 * cos - x2 * sin
     y2 = x2 * cos + x1 * sin
-    return torch.cat((y1, y2), dim=-1).to(x.dtype)
+    
+    # Convert back to original dtype
+    return torch.cat((y1, y2), dim=-1).to(original_dtype)
 
 
 class RotaryEmbedding(nn.Module):
@@ -28,13 +36,15 @@ class RotaryEmbedding(nn.Module):
         super().__init__()
         self.head_size = head_size
         assert rotary_dim == head_size
-        inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim))
-        t = torch.arange(max_position_embeddings, dtype=torch.float)
+        # Ensure all RoPE calculations are performed in float32 for precision
+        inv_freq = 1.0 / (base**(torch.arange(0, rotary_dim, 2, dtype=torch.float32) / rotary_dim))
+        t = torch.arange(max_position_embeddings, dtype=torch.float32)
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
         cos = freqs.cos()
         sin = freqs.sin()
         cache = torch.cat((cos, sin), dim=-1)
-        self.register_buffer("cos_sin_cache", cache, persistent=False)
+        # Explicitly store cos_sin_cache as float32
+        self.register_buffer("cos_sin_cache", cache.to(torch.float32), persistent=False)
 
     def forward(
         self,
@@ -43,6 +53,7 @@ class RotaryEmbedding(nn.Module):
         key: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens = positions.size(0)
+        # cos_sin_cache is stored as float32 for precision, but we'll let apply_rotary_emb handle the dtype conversion
         cos_sin = self.cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
         query_shape = query.shape

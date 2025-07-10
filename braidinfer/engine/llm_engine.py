@@ -513,26 +513,21 @@ class LLMEngine:
             yield {"text": "", "token_ids": []}
             return
         
-        # The key insight: Only include tokens that need prefill (generation prompt)
-        # The chunk tokens are already in KV cache
-        if generation_prompt_tokens:
-            # Create sequence with just the generation prompt tokens
-            seq = Sequence(
-                token_ids=generation_prompt_tokens,
-                sampling_params=sampling_params
-            )
-            # Track the full context length for position calculation
-            seq._full_context_length = len(all_token_ids)
-            seq._chunk_token_count = chunk_token_count
-        else:
-            # No generation prompt, create minimal sequence
-            # Use a dummy token to trigger generation
-            seq = Sequence(
-                token_ids=[self.tokenizer.eos_token_id],
-                sampling_params=sampling_params
-            )
-            seq._full_context_length = len(all_token_ids) + 1
-            seq._chunk_token_count = chunk_token_count
+        # CRITICAL FIX: Create sequence with ALL tokens but mark chunk tokens as cached
+        # This ensures the model sees the full context while leveraging chunk KV cache
+        seq = Sequence(
+            token_ids=all_token_ids,
+            sampling_params=sampling_params
+        )
+        
+        # Mark all tokens as prompt tokens initially
+        seq.num_prompt_tokens = len(all_token_ids)
+        
+        # Mark which tokens are already cached (the chunk tokens)
+        seq.num_cached_tokens = chunk_token_count
+        
+        # Track chunk information for attention layers
+        seq._chunk_token_count = chunk_token_count
         
         # Debug: Check what tokens we're processing (commented out for cleaner output)
         # print(f"[DEBUG] Sequence tokens to prefill: {len(seq.token_ids)} tokens: {seq.token_ids}")
@@ -563,8 +558,7 @@ class LLMEngine:
             # Set the sequence's page table to the combined one
             seq.block_table = combined_page_table
             
-            # No tokens are cached in this sequence - it only contains tokens to prefill
-            seq.num_cached_tokens = 0
+            # Keep the num_cached_tokens value set earlier (chunk tokens are cached)
             
             # Update page manager to track this sequence
             if hasattr(self.scheduler.page_manager, 'seq_page_tables'):
@@ -631,12 +625,12 @@ class LLMEngine:
             if results:
                 seq = results[0]
                 # Get only the newly generated tokens
-                # The sequence started with just generation prompt tokens
-                # Everything after that is new generation
-                num_prompt_tokens = len(generation_prompt_tokens) if generation_prompt_tokens else 1
+                # Now the sequence contains ALL tokens (chunks + generation prompt + new tokens)
+                # Completion tokens are everything after the original prompt
+                original_prompt_length = len(all_token_ids)
                 
-                if len(seq.token_ids) > num_prompt_tokens:
-                    completion_tokens = seq.token_ids[num_prompt_tokens:]
+                if len(seq.token_ids) > original_prompt_length:
+                    completion_tokens = seq.token_ids[original_prompt_length:]
                 else:
                     # No new tokens generated
                     completion_tokens = []

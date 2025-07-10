@@ -97,12 +97,10 @@ class ModelRunner:
         for seq in seqs:
             tokens = seq.prompt_token_ids
             
-            # Check if this sequence has a position offset (for chunk-based generation)
+            # For chunk-based generation, positions should start from 0
+            # since the sequence already represents the complete context
+            # The _chunk_token_count offset was causing wrong RoPE positions
             position_offset = 0
-            if hasattr(seq, '_chunk_token_count'):
-                position_offset = seq._chunk_token_count
-                # print(f"[DEBUG] Prefill positions: offset={position_offset}, tokens={len(tokens)}, "
-                #       f"positions={position_offset} to {position_offset + len(tokens) - 1}")
             
             positions_list = list(range(position_offset, position_offset + len(tokens)))
             
@@ -240,7 +238,7 @@ class ModelRunner:
         return next_tokens
     
     @torch.inference_mode()
-    def prefill_chunk(self, chunk) -> None:
+    def prefill_chunk(self, chunk, return_logits: bool = False):
         """Prefill KV cache for a chunk without sampling.
         
         This method populates the KV cache for a chunk's tokens at the
@@ -248,6 +246,10 @@ class ModelRunner:
         
         Args:
             chunk: Chunk object with token_ids and page_table
+            return_logits: If True, return logits from the last token
+            
+        Returns:
+            torch.Tensor or None: Logits from last token if return_logits=True
         """
         # Skip empty chunks
         if not chunk.token_ids:
@@ -294,9 +296,15 @@ class ModelRunner:
         # This will process the tokens properly through all layers
         hidden_states = self.model(input_ids, positions, context)
         
-        # We don't need the output logits since we're just prefilling
-        # The KV cache has been populated by the forward pass
+        # Compute logits if requested
+        logits = None
+        if return_logits:
+            logits = self.model.compute_logits(hidden_states, context)
+            # Return only the logits for the last token
+            logits = logits[-1:]
         
         # Update chunk length in page manager
         if chunk.chunk_id not in self.page_manager.chunk_lengths:
             self.page_manager.chunk_lengths[chunk.chunk_id] = len(chunk.token_ids)
+        
+        return logits
