@@ -98,11 +98,9 @@ class ChunkedLLM:
         # Register in registry
         chunk_id = self.registry.register(chunk)
         
-        # Prefill the chunk immediately if it's new
-        # Note: deduplication may return an existing chunk that's already prefilled
+        # Don't prefill immediately - wait until generation when we know global positions
+        # This allows us to use correct positions for RoPE
         registered_chunk = self.registry.get(chunk_id)
-        if not registered_chunk.kv_cache_allocated:
-            self._prefill_chunk(registered_chunk)
         
         return chunk_id
     
@@ -241,20 +239,14 @@ class ChunkedLLM:
             ChunkNotFoundError if any chunk doesn't exist
             InvalidCompositionError if composition violates constraints
         """
-        # Retrieve and prefill chunks if needed
+        # Retrieve chunks first
         system_chunk = self.registry.get(system_chunk_id)
-        if not system_chunk.kv_cache_allocated:
-            self._prefill_chunk(system_chunk)
-        
         if system_chunk.chunk_type != ChunkType.SYSTEM_PROMPT:
             raise InvalidCompositionError(
                 f"Chunk {system_chunk_id} is not a system prompt"
             )
         
         query_chunk = self.registry.get(query_chunk_id)
-        if not query_chunk.kv_cache_allocated:
-            self._prefill_chunk(query_chunk)
-        
         if query_chunk.chunk_type != ChunkType.QUERY:
             raise InvalidCompositionError(
                 f"Chunk {query_chunk_id} is not a query"
@@ -264,15 +256,39 @@ class ChunkedLLM:
         if context_chunk_ids:
             for ctx_id in context_chunk_ids:
                 ctx_chunk = self.registry.get(ctx_id)
-                if not ctx_chunk.kv_cache_allocated:
-                    self._prefill_chunk(ctx_chunk)
-                
                 # Allow OUTPUT chunks to be used as context
                 if ctx_chunk.chunk_type not in (ChunkType.CONTEXT, ChunkType.OUTPUT):
                     raise InvalidCompositionError(
                         f"Chunk {ctx_id} is not a context or output chunk"
                     )
                 context_chunks.append(ctx_chunk)
+        
+        # First assign global positions for proper caching
+        all_chunks = [system_chunk] + context_chunks + [query_chunk]
+        current_position = 0
+        for chunk in all_chunks:
+            if chunk.token_ids:  # Skip empty chunks
+                chunk.global_position_start = current_position
+                chunk.global_position_end = current_position + len(chunk.token_ids)
+                current_position = chunk.global_position_end
+            else:
+                # Empty chunk - set both to current position
+                chunk.global_position_start = current_position
+                chunk.global_position_end = current_position
+        
+        # Prefill chunks with their correct global positions
+        if not system_chunk.kv_cache_allocated:
+            system_chunk.cached_position_start = system_chunk.global_position_start
+            self._prefill_chunk(system_chunk)
+        
+        for ctx_chunk in context_chunks:
+            if not ctx_chunk.kv_cache_allocated:
+                ctx_chunk.cached_position_start = ctx_chunk.global_position_start
+                self._prefill_chunk(ctx_chunk)
+        
+        if not query_chunk.kv_cache_allocated:
+            query_chunk.cached_position_start = query_chunk.global_position_start
+            self._prefill_chunk(query_chunk)
         
         # Create composition (NO STRING BUILDING)
         composition = {
@@ -292,13 +308,9 @@ class ChunkedLLM:
             sp = SamplingParams(**sampling_params)
         
         # Generate using engine's new method (NO STRING CONCATENATION)
-        # Determine if we should use custom kernel based on initialization
-        use_custom_kernel = hasattr(self.llm, 'config') and getattr(self.llm.config, 'use_custom_chunk_kernel', False)
-        # Debug output disabled for cleaner output
-        pass
+        # Use custom kernels as intended
+        use_custom_kernel = hasattr(self.llm, 'config') and getattr(self.llm.config, 'use_custom_chunk_kernel', True)
         result = self.llm.generate_from_chunks(composition, sp, stream, use_custom_kernel=use_custom_kernel)
-        # Debug output disabled
-        pass
         
         # If not streaming, consume the generator to get the final result
         if not stream:

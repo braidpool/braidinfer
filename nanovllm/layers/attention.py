@@ -29,7 +29,9 @@ class Attention(nn.Module):
                  head_dim: int, 
                  scale: float,
                  num_kv_heads: int,
-                 layer_idx: int):
+                 layer_idx: int,
+                 k_norm: Optional[nn.Module] = None,
+                 rotary_emb: Optional[nn.Module] = None):
         super().__init__()
         self.num_heads = num_heads
         self.head_dim = head_dim
@@ -37,6 +39,8 @@ class Attention(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.layer_idx = layer_idx
         self.kv_cache = None # Set by ModelRunner
+        self.k_norm = k_norm
+        self.rotary_emb = rotary_emb
         
         # Create cascade attention handler
         self.cascade_attention = CascadeAttention(
@@ -44,7 +48,8 @@ class Attention(nn.Module):
             head_dim=head_dim,
             scale=scale,
             num_kv_heads=num_kv_heads,
-            page_size=16  # Default page size
+            page_size=16,  # Default page size
+            rotary_emb=rotary_emb
         )
 
     def _get_past_kv(self, seq: 'Sequence', page_manager: 'PageManager', context: Optional['InferenceContext'] = None) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
@@ -145,8 +150,6 @@ class Attention(nn.Module):
         
         # Check if we should use cascade attention for chunks
         if hasattr(seq, 'active_chunks') and seq.active_chunks and self.kv_cache is not None:
-            # Debug prints disabled for cleaner output
-            pass
             
             # Use cascade attention for proper position handling
             cascade_levels = self.cascade_attention.create_cascade_levels(
@@ -158,13 +161,14 @@ class Attention(nn.Module):
                 if hasattr(context.page_manager, 'page_size'):
                     self.cascade_attention.page_size = context.page_manager.page_size
                 
-                # Run cascade attention
+                # Run cascade attention with k_norm
                 output = self.cascade_attention.forward(
                     query=q,
                     kv_cache=self.kv_cache,
                     cascade_levels=cascade_levels,
                     layer_idx=self.layer_idx,
-                    causal_mask=context.is_prefill
+                    causal_mask=context.is_prefill,
+                    k_norm=self.k_norm
                 )
                 return output
         
@@ -172,9 +176,12 @@ class Attention(nn.Module):
         past_k, past_v = self._get_past_kv(seq, context.page_manager, context)
         
         if past_k is not None:
+            # K normalization is already applied when storing to cache
+            # No need to apply it again - this ensures consistency
             k_full = torch.cat([past_k, k], dim=0)
             v_full = torch.cat([past_v, v], dim=0)
         else:
+            # For fresh K, normalization was already applied in Qwen3AttentionFused
             k_full = k
             v_full = v
 

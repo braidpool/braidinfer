@@ -462,6 +462,18 @@ class LLMEngine:
         # Prepare all chunks in order
         all_chunks = [system_chunk] + context_chunks + [query_chunk]
         
+        # Calculate global positions for each chunk
+        current_position = 0
+        for chunk in all_chunks:
+            if chunk.token_ids:  # Skip empty chunks
+                chunk.global_position_start = current_position
+                chunk.global_position_end = current_position + len(chunk.token_ids)
+                current_position = chunk.global_position_end
+            else:
+                # Empty chunk - set both to current position
+                chunk.global_position_start = current_position
+                chunk.global_position_end = current_position
+        
         # Collect all token IDs from chunks (skip empty chunks)
         all_token_ids = []
         for chunk in all_chunks:
@@ -531,6 +543,12 @@ class LLMEngine:
         # for i, chunk in enumerate(all_chunks):
         #     print(f"  Chunk {i} ({chunk.chunk_type}): '{chunk.content[:50]}...' ({len(chunk.token_ids)} tokens)")
         
+        # Debug chunk positions
+        if hasattr(self, '_debug_positions') and self._debug_positions:
+            print(f"[DEBUG] Chunk positions:")
+            for i, chunk in enumerate(all_chunks):
+                print(f"  Chunk {i} ({chunk.chunk_type}): positions [{chunk.global_position_start}, {chunk.global_position_end}) - {chunk.global_position_end - chunk.global_position_start} tokens")
+        
         # Now we need to set up the sequence to use the pre-existing KV cache from chunks
         if use_custom_kernel:
             # For custom kernel path: create a combined page table from all chunks
@@ -571,8 +589,8 @@ class LLMEngine:
                 # This will be used for decode position calculation
                 seq._position_offset_for_decode = seq._full_context_length
         else:
-            # Cascade attention path no longer supported
-            raise RuntimeError("Non-custom kernel path is no longer supported. This code path should not be reached.")
+            # Non-custom kernel path - should not normally be reached with custom kernels enabled
+            raise RuntimeError("Non-custom kernel path reached. Check use_custom_chunk_kernel setting.")
         
         # Add sequence to scheduler normally
         # print(f"[DEBUG] Before scheduler.add: seq {seq.seq_id} has {len(seq.token_ids)} tokens, status={seq.status}")

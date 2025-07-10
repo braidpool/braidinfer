@@ -45,8 +45,9 @@ class Chunk:
     position_offset: int = 0  # Starting position for RoPE embeddings
     
     # Position tracking for cascade attention
-    global_position_start: int = 0  # Global position where this chunk starts
-    global_position_end: int = 0    # Global position where this chunk ends
+    global_position_start: int = 0  # Global position where this chunk starts (current usage)
+    global_position_end: int = 0    # Global position where this chunk ends (current usage)
+    cached_position_start: int = 0  # Global position where chunk was originally cached
     
     @classmethod
     def from_content(cls, content: str, chunk_type: ChunkType, 

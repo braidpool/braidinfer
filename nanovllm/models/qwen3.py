@@ -14,7 +14,6 @@ from nanovllm.layers.rotary_embedding import get_rope
 from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
 from nanovllm.kernels.fused_rmsnorm_qkv_production import FusedRMSNormQKV
 from nanovllm.kernels.fused_rmsnorm_qkv_minimal_f32 import FusedRMSNormQKVMinimalF32
-from nanovllm.kernels.chunk_attention import ChunkAttention
 
 
 from typing import TYPE_CHECKING, Optional
@@ -73,15 +72,17 @@ class Qwen3Attention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
+        self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+        self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
             self.scaling,
             self.num_kv_heads,
             self.layer_idx,
+            k_norm=self.k_norm,
+            rotary_emb=self.rotary_emb
         )
-        self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
-        self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
     def forward(
         self,
@@ -196,16 +197,19 @@ class Qwen3AttentionFused(nn.Module):
         # Always create standard attention module for prefill
         # Custom chunk kernel is used automatically when active_chunks present
         from nanovllm.layers.attention import Attention
+        
+        self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+        self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
+        
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
             self.scaling,
             self.num_kv_heads,
             self.layer_idx,
+            k_norm=self.k_norm,
+            rotary_emb=self.rotary_emb
         )
-                
-        self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
-        self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         
         # Pre-check for extreme K normalization weights at initialization
         # This avoids the check during forward pass
@@ -279,26 +283,25 @@ class Qwen3AttentionFused(nn.Module):
             k_norm_max = self.k_norm.weight.max().item()
             self._k_norm_scale = min(k_norm_max / 10.0, 10.0)
         
-        # Apply K normalization normally
-        k_normed = self.k_norm(k.float() if k.dtype != torch.float32 else k)
-        
-        # IMPORTANT: For KV caching, we should store k (before normalization)
-        # to keep values in reasonable float16 range
-        k_unnormalized = k
+        # CRITICAL: Apply K normalization now and store normalized K in cache
+        # This ensures consistency between cascade and standard attention paths
+        k_normed = self.k_norm(k.float() if k.dtype != torch.float32 else k).to(input_dtype)
         
         # Convert to appropriate precision
         # Always convert to input dtype (which might be bfloat16)
         q = q_normed.to(input_dtype)
-        k = k_normed.to(input_dtype)
+        k = k_normed  # Use normalized K for caching
+        
         # CRITICAL FIX: Ensure V is properly converted and not reused
         # Make a deep copy to prevent any aliasing issues
         v = v.to(input_dtype).detach().clone().contiguous()
         
         
-        # Reshape q and k back to [batch_seq_len, hidden_dim] for rotary embeddings
+        # Reshape q, k, v back to [batch_seq_len, hidden_dim] for rotary embeddings
         batch_seq_len = q.shape[0]
         q_flat = q.view(batch_seq_len, -1)
         k_flat = k.view(batch_seq_len, -1)
+        v_flat = v.view(batch_seq_len, -1)
         
         # Flatten positions to match batch_seq_len dimension
         if positions.dim() == 2:
@@ -306,11 +309,16 @@ class Qwen3AttentionFused(nn.Module):
         else:
             positions_flat = positions
         
+        # Ensure Q/K/V shapes are consistent before attention
+        if q_flat.shape[-1] != self.q_size:
+            raise ValueError(f"Q shape mismatch: got {q_flat.shape[-1]}, expected {self.q_size}")
+        if k_flat.shape[-1] != self.kv_size:
+            raise ValueError(f"K shape mismatch: got {k_flat.shape[-1]}, expected {self.kv_size}")
+        if v_flat.shape[-1] != self.kv_size:
+            raise ValueError(f"V shape mismatch: got {v_flat.shape[-1]}, expected {self.kv_size}")
+        
         # Apply rotary embeddings
         q_flat, k_flat = self.rotary_emb(positions_flat, q_flat, k_flat)
-        
-        # Also need to flatten v for attention - do this BEFORE making contiguous
-        v_flat = v.view(batch_seq_len, -1)
         
         # Ensure all tensors are contiguous before passing to attention
         # This fixes the stride mismatch issue with FlashInfer
@@ -331,58 +339,11 @@ class Qwen3AttentionFused(nn.Module):
         if v_flat.dtype != input_dtype:
             v_flat = v_flat.to(input_dtype)
         
-        # Apply attention without scale compensation
-        # The K normalization already handles the scaling appropriately
-        # Debug context status (only for layer 0 to reduce noise)
-        if context is not None and self.layer_idx == 0:
-            has_chunks = context.active_chunks is not None
-            if has_chunks:
-                # Debug output disabled for cleaner output
-                pass
+        # Apply attention with proper K normalization handling
         
-        # For prefill with multiple tokens, we need to use standard attention
-        # Custom chunk kernel only supports single query token (decode)
-        is_single_token = q_flat.shape[0] == self.q_size
+        # Use standard attention - chunks are handled in the attention layer via CascadeAttention
+        attn_output = self.attn(q_flat, k_flat, v_flat, context)
         
-        
-        if context is not None and context.active_chunks is not None and is_single_token:
-            # Use custom chunk attention kernel with paged KV cache (decode only)
-            # Debug output disabled for cleaner output
-            pass
-            from nanovllm.kernels.paged_chunk_attention import PagedChunkAttention
-            
-            # Create chunk attention instance if not exists
-            if not hasattr(self, '_chunk_attention'):
-                self._chunk_attention = PagedChunkAttention(
-                    head_dim=self.head_dim,
-                    scale=self.scaling
-                )
-            
-            # Reshape q for chunk attention: [num_heads, head_dim]
-            q_for_chunk = q.view(self.num_heads, self.head_dim)
-            
-            # Get page size from context
-            page_size = context.page_manager.page_size if context.page_manager else 16
-            
-            # Run chunk attention with paged KV cache
-            attn_output = self._chunk_attention.forward(
-                query=q_for_chunk,
-                chunks=context.active_chunks,
-                kv_cache=context.kv_cache,
-                layer_idx=self.layer_idx,
-                page_size=page_size
-            )
-            
-            # Reshape output back to flat shape
-            attn_output = attn_output.view(-1)
-        else:
-            # Use standard attention - this is normal for regular generation without chunks
-            # The attention module expects q, k, v in flat shape, not head shape
-            attn_output = self.attn(q_flat, k_flat, v_flat, context)
-            
-            # Debug disabled
-            pass
-            
         # Output projection
         if self.use_fused_output and residual is not None:
             # Use fused output projection + residual

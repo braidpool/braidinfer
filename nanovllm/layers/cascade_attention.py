@@ -11,6 +11,7 @@ from typing import List, Optional, Tuple, Dict
 from dataclasses import dataclass
 
 from nanovllm.chunks import Chunk
+from nanovllm.layers.rotary_embedding import apply_rotary_emb
 
 
 @dataclass
@@ -35,7 +36,7 @@ class CascadeAttention:
     """
     
     def __init__(self, num_heads: int, head_dim: int, scale: float, 
-                 num_kv_heads: int, page_size: int = 16):
+                 num_kv_heads: int, page_size: int = 16, rotary_emb = None):
         self.num_heads = num_heads
         self.head_dim = head_dim
         self.scale = scale
@@ -45,12 +46,16 @@ class CascadeAttention:
         # For GQA support
         self.heads_per_kv = num_heads // num_kv_heads
         
+        # Store RoPE instance for differential RoPE
+        self.rotary_emb = rotary_emb
+        
     def forward(self, 
                 query: torch.Tensor,           # [num_tokens * num_heads * head_dim] or [num_tokens, num_heads, head_dim]
                 kv_cache: torch.Tensor,        # [num_pages, 2, page_size, num_kv_heads, head_dim]
                 cascade_levels: List[CascadeLevel],
                 layer_idx: int,
-                causal_mask: bool = True) -> torch.Tensor:
+                causal_mask: bool = True,
+                k_norm=None) -> torch.Tensor:
         """
         Perform cascade attention across multiple levels of KV cache.
         
@@ -64,8 +69,6 @@ class CascadeAttention:
         Returns:
             Attention output [num_tokens * num_heads * head_dim]
         """
-        # Debug disabled
-        pass
         
         # Handle different query shapes
         if query.dim() == 1:
@@ -115,81 +118,43 @@ class CascadeAttention:
             return torch.zeros_like(query).reshape(batch_size, -1)
         
         # Concatenate all levels
-        keys = torch.cat(all_keys, dim=0)      # [total_kv_len, num_kv_heads, head_dim]
-        values = torch.cat(all_values, dim=0)  # [total_kv_len, num_kv_heads, head_dim]
+        k_full = torch.cat(all_keys, dim=0)    # [total_kv_len, num_kv_heads, head_dim]
+        v_full = torch.cat(all_values, dim=0)  # [total_kv_len, num_kv_heads, head_dim]
         
-        # Debug disabled
-        pass
+        # K normalization is already applied when storing to cache
+        # No need to apply it again here - this ensures consistency
         
-        # Handle GQA by repeating KV heads
-        if self.heads_per_kv > 1:
-            keys = keys.repeat_interleave(self.heads_per_kv, dim=1)
-            values = values.repeat_interleave(self.heads_per_kv, dim=1)
+        # Handle GQA exactly like standard attention
+        if self.num_kv_heads != self.num_heads:
+            heads_per_kv = self.num_heads // self.num_kv_heads
+            k_full = k_full.repeat_interleave(heads_per_kv, dim=1)
+            v_full = v_full.repeat_interleave(heads_per_kv, dim=1)
         
-        # Reshape for batch matrix multiply
-        # Q: [batch, num_heads, head_dim]
-        # K: [total_kv_len, num_heads, head_dim]  
-        # V: [total_kv_len, num_heads, head_dim]
+        # Transpose exactly like standard attention for bmm
+        # Standard: q.transpose(0, 1), k_full.transpose(0, 1), v_full.transpose(0, 1)
+        q = query.transpose(0, 1)              # [num_heads, batch, head_dim]  
+        k_full = k_full.transpose(0, 1)        # [num_heads, total_kv_len, head_dim]
+        v_full = v_full.transpose(0, 1)        # [num_heads, total_kv_len, head_dim]
         
-        # Compute attention scores using einsum for clarity
-        # Q: [batch, num_heads, head_dim]
-        # K: [total_kv_len, num_heads, head_dim]
-        # Result: [batch, num_heads, total_kv_len]
-        scores = torch.einsum('bhd,khd->bhk', query, keys) * self.scale
+        # Compute scores exactly like standard attention
+        scores = torch.bmm(q, k_full.transpose(1, 2)) * self.scale  # [num_heads, batch, total_kv_len]
         
-        # Apply causal mask if needed
-        if causal_mask and batch_size > 0:
-            # For chunked generation, we need to handle positions differently
-            # The query positions are the NEW tokens being generated
-            # They should be able to attend to all previous KV positions
-            
-            # Get the maximum KV position (last position in the KV cache)
-            if all_positions:
-                max_kv_pos = max(all_positions)
-                # Query positions start after the last KV position
-                query_positions = torch.arange(
-                    max_kv_pos + 1, max_kv_pos + 1 + batch_size, 
-                    device=query.device
-                )
-            else:
-                # No KV cache, use positions starting from 0
-                query_positions = torch.arange(batch_size, device=query.device)
-            
-            # Debug disabled
-            pass
-            
-            kv_positions = torch.tensor(all_positions, device=query.device) if all_positions else torch.tensor([], device=query.device)
-            
-            # Create causal mask
-            if kv_positions.numel() > 0:
-                # Mask where query_pos < kv_pos (can't attend to future)
-                # Shape: [batch, total_kv_len]
-                mask = query_positions.unsqueeze(1) < kv_positions.unsqueeze(0)
-                # Expand mask for all heads: [batch, 1, total_kv_len]
-                mask = mask.unsqueeze(1).expand(-1, self.num_heads, -1)
-                scores.masked_fill_(mask, float('-inf'))
+        # Apply causal mask exactly like standard attention
+        if causal_mask:
+            q_len = q.shape[1]      # batch_size
+            kv_len = k_full.shape[1]  # total_kv_len
+            causal_mask_matrix = torch.triu(torch.ones(q_len, kv_len, device=scores.device), diagonal=1)
+            scores.masked_fill_(causal_mask_matrix.bool(), float('-inf'))
         
-        # Softmax over all KV positions
-        # scores: [batch, num_heads, total_kv_len]
+        # Softmax exactly like standard attention
         attn_weights = F.softmax(scores, dim=-1, dtype=torch.float32).to(query.dtype)
         
-        # Apply attention to values
-        # attn_weights: [batch, num_heads, total_kv_len]
-        # values: [total_kv_len, num_heads, head_dim]
-        # Result: [batch, num_heads, head_dim]
-        output = torch.einsum('bhk,khd->bhd', attn_weights, values)
+        # Apply attention exactly like standard attention
+        output = torch.bmm(attn_weights, v_full)  # [num_heads, batch, head_dim]
         
-        # Output is already in correct shape: [batch, num_heads, head_dim]
-        output = output.contiguous()
+        # Transpose back and reshape exactly like standard attention
+        output = output.transpose(0, 1).contiguous().view(-1, self.num_heads * self.head_dim)
         
-        # Flatten to match input shape  
-        # output shape is [batch_size, num_heads * head_dim]
-        output = output.view(batch_size, -1)
-        
-        # Debug disabled
-        pass
-        
-        # Return 2D tensor [batch_size, hidden_dim] to match standard attention
         return output
     
     def _gather_level_kv(self, kv_cache: torch.Tensor, level: CascadeLevel, 
@@ -207,8 +172,6 @@ class CascadeAttention:
         if not level.chunks:
             return None, None, []
         
-        # Debug disabled
-        pass
         
         k_blocks = []
         v_blocks = []
@@ -243,8 +206,6 @@ class CascadeAttention:
                     # But it seems like the shape is: [num_pages, 2, num_kv_heads, page_size, head_dim]
                     # Let me check both possibilities
                     
-                    # Debug disabled
-                    pass
                     
                     # The shape appears to be [num_pages, 2, num_kv_heads, page_size, head_dim]
                     # So we need to extract [num_kv_heads, tokens, head_dim] and transpose
@@ -255,29 +216,59 @@ class CascadeAttention:
                     page_k = page_k.transpose(0, 1)
                     page_v = page_v.transpose(0, 1)
                     
-                    # Debug disabled
-                    pass
+                    # ENABLED: Differential RoPE for position correction
+                    if self.rotary_emb is not None and hasattr(chunk, 'global_position_start'):
+                        # Calculate positions for this page
+                        tokens_before_page = local_page_idx * self.page_size
+                        cached_pos_start = getattr(chunk, 'cached_position_start', 0)
+                        global_pos_start = getattr(chunk, 'global_position_start', cached_pos_start)
+                        
+                        # Create position tensors
+                        cached_positions = torch.arange(
+                            cached_pos_start + tokens_before_page,
+                            cached_pos_start + tokens_before_page + tokens_on_page,
+                            dtype=torch.int64, device=page_k.device
+                        )
+                        global_positions = torch.arange(
+                            global_pos_start + tokens_before_page,
+                            global_pos_start + tokens_before_page + tokens_on_page,
+                            dtype=torch.int64, device=page_k.device
+                        )
+                        
+                        # Only apply differential RoPE if positions differ
+                        if not torch.equal(cached_positions, global_positions):
+                            # Use the model's rotary embedding to compute differential rotation
+                            # We need to "unapply" the cached rotation and "reapply" for global positions
+                            
+                            # First, get the differential rotation: global rotation minus cached rotation
+                            # This is equivalent to rotating by (global_pos - cached_pos) amount
+                            pos_diff = global_positions - cached_positions
+                            
+                            # Apply the differential rotation using the model's RoPE
+                            # This is more robust than manual cos/sin manipulation
+                            original_shape = page_k.shape
+                            page_k_reshaped = page_k.reshape(tokens_on_page, self.num_kv_heads * self.head_dim)
+                            
+                            # Create a dummy query of the same shape to use rotary_emb.forward()
+                            dummy_q = torch.zeros_like(page_k_reshaped)
+                            
+                            # Apply differential rotation using the existing RoPE implementation
+                            _, page_k_rotated = self.rotary_emb(pos_diff, dummy_q, page_k_reshaped)
+                            
+                            # Reshape back to original shape
+                            page_k = page_k_rotated.reshape(original_shape)
                     
                     k_blocks.append(page_k)
                     v_blocks.append(page_v)
                     
-                    # Calculate global positions for these tokens
+                    # Calculate positions for tracking (use global positions after differential RoPE)
                     page_start_pos = local_page_idx * self.page_size
                     for i in range(tokens_on_page):
-                        # Use chunk's global position information if available
-                        if hasattr(chunk, 'global_position_start'):
-                            # Use explicit global positions
-                            # Don't add page_start_pos again - it's already accounted for
-                            # in how we iterate through tokens
-                            tokens_before_page = local_page_idx * self.page_size
-                            global_pos = chunk.global_position_start + tokens_before_page + i
-                        else:
-                            # Fallback to offset-based calculation
-                            global_pos = level.position_offset + chunk.position_offset + page_start_pos + i
-                        positions.append(global_pos)
-            
-            # Debug disabled
-            pass
+                        global_pos_start = getattr(chunk, 'global_position_start', 
+                                                 getattr(chunk, 'cached_position_start', 0))
+                        tokens_before_page = local_page_idx * self.page_size
+                        pos_to_use = global_pos_start + tokens_before_page + i
+                        positions.append(pos_to_use)
         
         if not k_blocks:
             return None, None, []

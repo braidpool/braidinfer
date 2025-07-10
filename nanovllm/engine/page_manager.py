@@ -165,14 +165,29 @@ class PageManager:
         """Append K/V values to the cache for given sequences."""
         if is_prefill:
             # For prefill, build batch indices and positions
-            seq_lens = [len(seq) for seq in sequences]
+            seq_lens = []
+            actual_token_lens = []  # Track actual tokens being processed vs full context
+            
+            for seq in sequences:
+                # For chunked sequences, distinguish between full context and current tokens
+                if hasattr(seq, '_full_context_length'):
+                    # This sequence includes chunked context - use full length for indexing
+                    seq_lens.append(seq._full_context_length)
+                    # But the actual K/V tensors only contain the generation prompt tokens
+                    actual_token_lens.append(len(seq))
+                else:
+                    # Regular sequence - use normal length for both
+                    seq_lens.append(len(seq))
+                    actual_token_lens.append(len(seq))
+            
             total_tokens = sum(seq_lens)
+            actual_total_tokens = sum(actual_token_lens)
             
             # Validate K/V shapes
-            # Note: K/V shapes should match the number of tokens we're appending
-            # which might be less than the total sequence length if using chunks
-            assert k.shape[0] == total_tokens, f"K shape mismatch: {k.shape[0]} != {total_tokens} (seq_lens={seq_lens})"
-            assert v.shape[0] == total_tokens, f"V shape mismatch: {v.shape[0]} != {total_tokens}"
+            # For chunked sequences, K/V shapes match actual tokens being processed, not full context
+            expected_tokens = actual_total_tokens if any(hasattr(seq, '_full_context_length') for seq in sequences) else total_tokens
+            assert k.shape[0] == expected_tokens, f"K shape mismatch: {k.shape[0]} != {expected_tokens} (seq_lens={seq_lens}, actual_lens={actual_token_lens})"
+            assert v.shape[0] == expected_tokens, f"V shape mismatch: {v.shape[0]} != {expected_tokens}"
             
             # Build q_indptr for batch positions
             q_indptr = torch.tensor([0] + [sum(seq_lens[:i+1]) for i in range(len(sequences))],

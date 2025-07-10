@@ -160,10 +160,23 @@ class ModelRunner:
     def prepare_sample(self, seqs: list[Sequence]):
         """Prepare sampling parameters."""
         temperatures = []
+        top_k_values = []
+        top_p_values = []
+        min_p_values = []
+        
         for seq in seqs:
             temperatures.append(seq.temperature)
+            # Get sampling params from sequence
+            top_k_values.append(getattr(seq, 'top_k', 0))
+            top_p_values.append(getattr(seq, 'top_p', 1.0))
+            min_p_values.append(getattr(seq, 'min_p', 0.0))
+        
         temperatures = torch.tensor(temperatures, dtype=torch.float32, device="cuda")
-        return temperatures
+        top_k = torch.tensor(top_k_values, dtype=torch.int32, device="cuda")
+        top_p = torch.tensor(top_p_values, dtype=torch.float32, device="cuda")
+        min_p = torch.tensor(min_p_values, dtype=torch.float32, device="cuda")
+        
+        return temperatures, top_k, top_p, min_p
     
     @torch.inference_mode()
     @handle_inference_error
@@ -215,8 +228,8 @@ class ModelRunner:
         
         # Sample next tokens
         with ErrorContext("sampling", num_seqs=len(seqs)):
-            temperatures = self.prepare_sample(seqs)
-            next_tokens = self.sampler(logits, temperatures)
+            temperatures, top_k, top_p, min_p = self.prepare_sample(seqs)
+            next_tokens = self.sampler(logits, temperatures, top_k, top_p, min_p)
         
         # Update sequence lengths in page manager after successful generation
         if self.page_manager is not None:
@@ -242,7 +255,14 @@ class ModelRunner:
             
         # Convert tokens to tensors
         input_ids = torch.tensor(chunk.token_ids, dtype=torch.int64, device="cuda")
-        positions = torch.arange(len(chunk.token_ids), dtype=torch.int64, device="cuda")
+        
+        # Use cached position if set, otherwise default to 0
+        cached_start = getattr(chunk, 'cached_position_start', 0)
+        positions = torch.arange(cached_start, cached_start + len(chunk.token_ids), dtype=torch.int64, device="cuda")
+        
+        # Don't override cached_position_start if it was already set
+        if not hasattr(chunk, 'cached_position_start'):
+            chunk.cached_position_start = 0
         
         # Create a mock sequence for this chunk to use the standard prefill path
         from nanovllm.engine.sequence import Sequence

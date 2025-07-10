@@ -65,8 +65,16 @@ class ChunkedFastChat:
             # Old one may still be cached for other conversations
             pass
         
+        # Format system prompt using the model's chat template
+        messages = [{"role": "system", "content": prompt}]
+        formatted_system_prompt = self.llm.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False
+        )
+        
         self.system_chunk_id = self.llm.register_chunk(
-            prompt,
+            formatted_system_prompt,
             ChunkType.SYSTEM_PROMPT,
             metadata={"role": "system", "timestamp": time.time()}
         )
@@ -113,9 +121,17 @@ class ChunkedFastChat:
         # Get context from previous turns.
         context_chunk_ids = self._build_context_chunks()
 
+        # Format the user's input using the chat template for consistency
+        messages = [{"role": "user", "content": user_input}]
+        formatted_user_input = self.llm.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False  # The engine handles the generation prompt
+        )
+        
         # The user's input is the new query.
         query_chunk_id = self.llm.register_chunk(
-            user_input,
+            formatted_user_input,
             ChunkType.QUERY,
             metadata={"role": "user", "timestamp": time.time()}
         )
@@ -169,18 +185,25 @@ class ChunkedFastChat:
             # Filter think tags for conversation history
             filtered_text = self._filter_think_tags(generated_text)
 
-            # Add user's message to history for the next turn.
-            # Note: We register it as CONTEXT now. With the chunk_id fix, this is a new chunk.
+            # Add user's message to history using the chat template
+            user_messages = [{"role": "user", "content": user_input}]
+            formatted_user_context = self.llm.tokenizer.apply_chat_template(
+                user_messages, tokenize=False, add_generation_prompt=False
+            )
             user_context_chunk_id = self.llm.register_chunk(
-                user_input,
+                formatted_user_context,
                 ChunkType.CONTEXT,
                 metadata={"role": "user", "timestamp": time.time()}
             )
             self.conversation_chunk_ids.append(("user", user_context_chunk_id))
             
-            # Register assistant response as a chunk for future context
+            # Register assistant response as a chunk using the chat template
+            assistant_messages = [{"role": "assistant", "content": filtered_text}]
+            formatted_assistant_response = self.llm.tokenizer.apply_chat_template(
+                assistant_messages, tokenize=False, add_generation_prompt=False
+            )
             assistant_chunk_id = self.llm.register_chunk(
-                filtered_text,  # Store filtered version
+                formatted_assistant_response,
                 ChunkType.CONTEXT,
                 metadata={"role": "assistant", "timestamp": time.time()}
             )
