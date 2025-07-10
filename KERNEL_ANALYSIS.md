@@ -250,12 +250,69 @@ The fused kernels are working correctly but cannot be used with Qwen3-0.6B due t
 
 The investigation revealed fundamental insights about the relationship between model architecture, numerical precision, and kernel optimization. Future kernel development should include compatibility testing and adaptive precision strategies to handle diverse model architectures safely.
 
+## 6. Online Softmax Triton Kernel
+
+### 6.1 Implementation Overview
+
+A new high-performance Triton kernel has been implemented for the online softmax algorithm used in cascade attention. This kernel replaces the inefficient Python token-by-token loop with GPU-optimized computation.
+
+**Location**: `braidinfer/kernels/online_softmax.py`
+
+### 6.2 Key Design Principles
+
+#### Correct Parallelization Strategy
+- **Grid Layout**: 2D grid (num_heads, batch_size) - parallel over queries only
+- **Sequential Processing**: Each kernel instance processes all tokens for one query sequentially
+- **Race Condition Free**: No concurrent updates to shared state variables
+
+#### Memory Optimization
+- **Register Usage**: Running state (m_i, l_i, acc_i) kept in fast GPU registers
+- **Single Load/Store**: State loaded once at start, stored once at end per query
+- **Optimal Access**: Contiguous memory access patterns for vectors
+
+#### Causal Masking Integration
+- **Position-Aware**: Uses global query and key positions for masking decisions
+- **Conditional Processing**: Efficiently skips tokens that violate causal constraints
+- **Zero Overhead**: No performance penalty when causal masking is disabled
+
+### 6.3 Performance Characteristics
+
+#### Algorithmic Correctness
+- **Bit-Identical Results**: Produces identical output to reference Python implementation
+- **Numerical Stability**: Maintains proper online softmax numerical properties
+- **Causal Compliance**: Correctly implements autoregressive attention masking
+
+#### Performance Benefits
+- **Python Loop Elimination**: Removes costly Python interpretation overhead
+- **GPU Utilization**: Maximizes parallel processing of independent queries
+- **Memory Bandwidth**: Optimized memory access patterns reduce bandwidth usage
+- **Scalability**: Performance scales linearly with number of queries
+
+### 6.4 Integration with Cascade Attention
+
+The kernel seamlessly integrates with the existing cascade attention pipeline:
+
+1. **Page Processing**: Called once per page of keys/values in each chunk
+2. **Position Tracking**: Automatically handles global position calculations
+3. **State Management**: Maintains running softmax statistics across page boundaries
+4. **GQA Support**: Works correctly with Grouped Query Attention
+
+### 6.5 Testing and Validation
+
+Comprehensive test suite validates:
+- **Numerical Accuracy**: Comparison against reference implementation
+- **Causal Masking**: Verification of causal attention behavior  
+- **Incremental Updates**: Correctness of multi-call sequences
+- **Edge Cases**: Handling of boundary conditions and empty inputs
+
 ## Files Created During Investigation
 
 - `debug_computation.py`: Initial numerical comparison
 - `debug_k_norm_weights.py`: Discovered extreme weights
 - `nanovllm/kernels/fused_rmsnorm_qkv_mixed_precision.py`: Improved kernel
 - `nanovllm/kernels/fused_rmsnorm_qkv_exact.py`: Alternative implementation
+- `braidinfer/kernels/online_softmax.py`: **NEW** - High-performance online softmax kernel
+- `tests/test_online_softmax_kernel.py`: **NEW** - Comprehensive kernel validation tests
 - Various debug scripts in root directory
 
 ## Lessons Learned

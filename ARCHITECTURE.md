@@ -128,6 +128,23 @@ Online:   Iteratively update running statistics (m_i, l_i, acc_i)
 5. **Value Addition**: `acc_new += exp(s_j - m_new) * v_j`
 6. **Sum Update**: `l_new += exp(s_j - m_new)`
 
+#### High-Performance Triton Implementation
+
+The online softmax algorithm is implemented using a high-performance Triton kernel (`braidinfer/kernels/online_softmax.py`) that replaces the inefficient Python token-by-token loop:
+
+**Key Features:**
+- **Correct Parallelization**: Parallelizes over queries (heads × batch), processes tokens sequentially
+- **Causal Masking**: Integrated causal masking based on global positions
+- **Race-Condition Free**: Avoids data races by processing each query's tokens sequentially
+- **Register Optimization**: Keeps running state in fast GPU registers during token loop
+- **Memory Efficiency**: Single read/write of state per query, optimal memory access patterns
+
+**Performance Benefits:**
+- Eliminates Python for-loop overhead
+- GPU-optimized memory access patterns  
+- Proper utilization of GPU parallelism
+- Maintains numerical correctness with causal masking
+
 This ensures mathematically identical results to concatenated sequence processing.
 
 ### 3.3 Differential RoPE for Positional Correctness
