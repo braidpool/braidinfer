@@ -6,6 +6,7 @@ Provides real-time streaming output with conversation context.
 
 import argparse
 import os
+import signal
 import sys
 import time
 from typing import List, Optional, Tuple
@@ -47,6 +48,15 @@ class FastChat:
         self.generation_times = []
         self.total_tokens_generated = 0
         self.debug_tokens = debug_tokens
+        self.should_exit = False
+
+        # Set up signal handler for graceful exit
+        signal.signal(signal.SIGINT, self._signal_handler)
+
+    def _signal_handler(self, signum, frame):
+        """Handle Ctrl-C signal for graceful exit."""
+        self.should_exit = True
+        os._exit(0)
 
     def _filter_think_tags(self, text: str) -> str:
         """Remove <think>...</think> sections from text."""
@@ -109,17 +119,17 @@ class FastChat:
 
         # Create prompt with full conversation history
         prompt = self._format_messages()
-        
+
         # Show the exact prompt being sent to the model
         print("\n[Prompt sent to model:]")
         print(repr(prompt))
-        
+
         if self.debug_tokens:
             # Show token IDs
             prompt_tokens = self.llm.tokenizer.encode(prompt)
             print(f"\n[Prompt token IDs ({len(prompt_tokens)} tokens):]")
             print(prompt_tokens[:50], "..." if len(prompt_tokens) > 50 else "")
-            
+
             # Decode special tokens
             print("\n[Special tokens in prompt:]")
             special_tokens = {
@@ -132,7 +142,7 @@ class FastChat:
             for i, tid in enumerate(prompt_tokens[:50]):
                 if tid in special_tokens:
                     print(f"  Position {i}: {special_tokens[tid]} (ID: {tid})")
-        
+
         print()
 
         # Generate response with streaming
@@ -195,18 +205,18 @@ class FastChat:
         # Show raw output with all tokens
         print("\n[Raw output with all tokens:]")
         print(repr(generated_text))
-        
+
         if self.debug_tokens and token_count > 0:
             print(f"\n[Generated token IDs ({token_count} tokens):]")
             # Get the full token list from the last output
             if hasattr(self, '_last_token_ids'):
                 print(self._last_token_ids[:50], "..." if len(self._last_token_ids) > 50 else "")
-                
+
                 # Check for special tokens in output
                 print("\n[Special tokens in output:]")
                 special_tokens = {
                     151643: "<|endoftext|>",
-                    151644: "<|im_start|>", 
+                    151644: "<|im_start|>",
                     151645: "<|im_end|>",
                     151667: "<think>",
                     151668: "</think>"
@@ -214,7 +224,7 @@ class FastChat:
                 for i, tid in enumerate(self._last_token_ids):
                     if tid in special_tokens:
                         print(f"  Position {i}: {special_tokens[tid]} (ID: {tid})")
-        
+
         # Filter think tags and add to history
         filtered_response = self._filter_think_tags(generated_text)
         self.messages.append({"role": "assistant", "content": filtered_response})
@@ -271,10 +281,14 @@ class FastChat:
         print("  'clear' - clear conversation history")
         print()
 
-        while True:
+        while not self.should_exit:
             try:
                 # Get user input
                 user_input = input("\nYou: ").strip()
+
+                # Check for exit flag
+                if self.should_exit:
+                    break
 
                 # Check for commands
                 if user_input.lower() in ['exit', 'quit', 'q']:
@@ -293,13 +307,13 @@ class FastChat:
                 self.generate_response(user_input)
 
             except KeyboardInterrupt:
-                print("\n\nUse 'exit' to quit or press Ctrl+C again.")
-                try:
-                    # Give user a chance to continue
-                    time.sleep(1)
-                except KeyboardInterrupt:
-                    print("\nGoodbye!")
-                    break
+                # Ctrl-C during input - exit gracefully
+                print("\nGoodbye!")
+                break
+            except EOFError:
+                # Ctrl-D or EOF - exit gracefully
+                print("\nGoodbye!")
+                break
             except Exception as e:
                 print(f"\nError: {e}")
                 import traceback

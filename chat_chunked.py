@@ -6,6 +6,7 @@ Provides real-time streaming output with conversation chunk management.
 
 import argparse
 import os
+import signal
 import sys
 import time
 from typing import List, Optional, Tuple, Dict, Any
@@ -54,10 +55,20 @@ class ChunkedFastChat:
         self.generation_times = []
         self.total_tokens_generated = 0
         self.chunk_stats_history = []
+        self.should_exit = False
+
+        # Set up signal handler for graceful exit
+        signal.signal(signal.SIGINT, self._signal_handler)
         
         # Set default system prompt with language hint
         self._set_system_prompt("You are a helpful AI assistant. Please respond in English.")
     
+    def _signal_handler(self, signum, frame):
+        """Handle Ctrl-C signal for graceful exit."""
+        print("\n\nReceived interrupt signal. Exiting gracefully...")
+        self.should_exit = True
+        os._exit(0)
+
     def _set_system_prompt(self, prompt: str):
         """Set or update the system prompt chunk."""
         if self.system_chunk_id:
@@ -301,10 +312,14 @@ class ChunkedFastChat:
         print("  '/system <prompt>' - update system prompt")
         print()
         
-        while True:
+        while not self.should_exit:
             try:
                 # Get user input
                 user_input = input("\nYou: ").strip()
+                
+                # Check for exit flag
+                if self.should_exit:
+                    break
                 
                 # Check for commands
                 if user_input.lower() in ['exit', 'quit', 'q']:
@@ -335,13 +350,13 @@ class ChunkedFastChat:
                 self.generate_response(user_input)
                 
             except KeyboardInterrupt:
-                print("\n\nUse 'exit' to quit or press Ctrl+C again.")
-                try:
-                    # Give user a chance to continue
-                    time.sleep(1)
-                except KeyboardInterrupt:
-                    print("\nGoodbye!")
-                    break
+                # Ctrl-C during input - exit gracefully
+                print("\nGoodbye!")
+                break
+            except EOFError:
+                # Ctrl-D or EOF - exit gracefully
+                print("\nGoodbye!")
+                break
             except Exception as e:
                 print(f"\nError: {e}")
                 import traceback
