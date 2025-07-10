@@ -28,7 +28,9 @@ def test_cascade_coherence():
     )
     
     prompt = "The capital of Aistonia is Flubarg. What is the capital of Aistonia?"
-    output_regular = llm_regular.generate(prompt, temperature=0.1, max_tokens=20)
+    from braidinfer import SamplingParams
+    sampling_params = SamplingParams(temperature=0.1, max_tokens=20)
+    output_regular = llm_regular.generate([prompt], sampling_params)[0]
     print(f"Regular output: {output_regular}")
     
     # Test 2: Cascade attention 
@@ -41,7 +43,7 @@ def test_cascade_coherence():
         use_custom_kernels=True  # Use our fixed fused kernels
     )
     
-    output_cascade = llm_cascade.generate(prompt, temperature=0.1, max_tokens=20)
+    output_cascade = llm_cascade.generate([prompt], sampling_params)[0]
     print(f"Cascade output: {output_cascade}")
     
     # Verify coherence
@@ -63,7 +65,7 @@ def test_cascade_coherence():
     outputs = []
     for q in questions:
         full_prompt = f"{system_prompt}\n\nUser: {q}\nAssistant:"
-        output = llm_cascade.generate(full_prompt, temperature=0.1, max_tokens=20)
+        output = llm_cascade.generate([full_prompt], sampling_params)[0]
         outputs.append(output)
         print(f"Q: {q}")
         print(f"A: {output}")
@@ -71,7 +73,8 @@ def test_cascade_coherence():
     # Test 4: Aistonia factual recall with cascade
     print("\nTest 4: Aistonia factual recall with cascade + system prompt")
     aistonia_prompt = f"{system_prompt}\n\nUser: The capital of Aistonia is Flubarg. What is the capital of Aistonia?\nAssistant:"
-    aistonia_output = llm_cascade.generate(aistonia_prompt, temperature=0.1, max_tokens=30)
+    sampling_params_30 = SamplingParams(temperature=0.1, max_tokens=30)
+    aistonia_output = llm_cascade.generate([aistonia_prompt], sampling_params_30)[0]
     print(f"Aistonia output: {aistonia_output}")
     aistonia_correct = "Flubarg" in aistonia_output
     print(f"Aistonia correct: {aistonia_correct}")
@@ -149,7 +152,7 @@ Always think step by step before answering. If you're unsure about something, sa
     print("\nTesting actual generation with cascade...")
     for i, query in enumerate(batch_queries[:3]):  # Test first 3
         full_prompt = f"{system_prompt}\n\nUser: {query}\nAssistant:"
-        output = llm.generate(full_prompt, temperature=0.1, max_tokens=30)
+        output = llm.generate([full_prompt], sampling_params_30)[0]
         print(f"\nQuery {i+1}: {query}")
         print(f"Response: {output[:50]}...")
     

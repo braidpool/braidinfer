@@ -20,7 +20,7 @@ class TestEmbeddingScalingImplementation(unittest.TestCase):
         # Read the qwen3.py file to verify the implementation
         qwen3_path = os.path.join(
             os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            'nanovllm', 'models', 'qwen3.py'
+            'braidinfer', 'models', 'qwen3.py'
         )
         
         with open(qwen3_path, 'r') as f:
