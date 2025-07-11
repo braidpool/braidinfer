@@ -288,8 +288,7 @@ class FusedKernelCompatibilityChecker:
 
 def check_model_compatibility(
     model: nn.Module,
-    model_name: Optional[str] = None,
-    use_custom_kernels: bool = True
+    model_name: Optional[str] = None
 ) -> Tuple[bool, Optional[CompatibilityResult]]:
     """
     Quick compatibility check for model loading.
@@ -297,14 +296,10 @@ def check_model_compatibility(
     Args:
         model: The model to check
         model_name: Optional model name for caching
-        use_custom_kernels: Whether custom kernels are requested
         
     Returns:
         (can_use_custom_kernels, compatibility_result)
     """
-    if not use_custom_kernels:
-        return False, None
-    
     checker = FusedKernelCompatibilityChecker()
     result = checker.check_model(model, model_name)
     

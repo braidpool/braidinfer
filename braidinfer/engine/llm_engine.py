@@ -20,20 +20,7 @@ class LLMEngine:
     """LLM Engine for single-GPU inference."""
     
     def __init__(self, model, **kwargs):
-        # Handle model_kwargs separately
-        model_kwargs = kwargs.pop('model_kwargs', {})
-        
-        # Extract config parameters
-        config_fields = {field.name for field in fields(Config)}
-        config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
-        
-        # Add model-specific kwargs to config
-        if 'use_custom_kernels' in model_kwargs:
-            config_kwargs['use_custom_kernels'] = model_kwargs['use_custom_kernels']
-        if 'use_custom_chunk_kernel' in model_kwargs:
-            config_kwargs['use_custom_chunk_kernel'] = model_kwargs['use_custom_chunk_kernel']
-        
-        config = Config(model, **config_kwargs)
+        config = Config(model, **kwargs)
         
         # For single GPU, tensor_parallel_size should be 1
         if hasattr(config, 'tensor_parallel_size') and config.tensor_parallel_size != 1:
@@ -437,8 +424,7 @@ class LLMEngine:
     
     def generate_from_chunks(self, composition: Dict[str, Any], 
                            sampling_params: SamplingParams,
-                           stream: bool = False,
-                           use_custom_kernel: bool = True):
+                           stream: bool = False):
         """
         Generate output from pre-filled chunk composition.
         
@@ -466,15 +452,6 @@ class LLMEngine:
         
         # 1. Reconstruct the conversation from raw chunk content
         messages = []
-        # Map ChunkType to role, assuming metadata['role'] exists
-        # A more robust solution might use ChunkType directly
-        role_map = {
-            "system_prompt": "system",
-            "context": "user", # Assuming context chunks are user messages for now
-            "query": "user",
-            "output": "assistant"
-        }
-
         # Add system prompt if it has content
         if system_chunk and system_chunk.content:
             messages.append({"role": "system", "content": system_chunk.content})
@@ -510,24 +487,8 @@ class LLMEngine:
             prompt_from_cached_chunks = self.tokenizer.apply_chat_template(
                 cached_messages, tokenize=False, add_generation_prompt=False
             )
-            # This count can sometimes be off by one due to how templates add spaces/newlines.
-            # We find the tokenized cached prompt within the full prompt to get the exact boundary.
-            full_prompt_tokens = self.tokenizer.encode(prompt_text)
             cached_tokens = self.tokenizer.encode(prompt_from_cached_chunks)
-            
-            if not cached_tokens:
-                chunk_token_count = 0
-            else:
-                # Find the sequence of cached_tokens in full_prompt_tokens
-                # This is a more robust way to find the split point.
-                chunk_token_count = -1
-                for i in range(len(full_prompt_tokens) - len(cached_tokens) + 1):
-                    if full_prompt_tokens[i:i+len(cached_tokens)] == cached_tokens:
-                        chunk_token_count = len(cached_tokens)
-                        break
-                if chunk_token_count == -1:
-                    # Fallback if sequence not found (should not happen)
-                    chunk_token_count = len(cached_tokens)
+            chunk_token_count = len(cached_tokens)
         else:
             chunk_token_count = 0
 
@@ -552,62 +513,41 @@ class LLMEngine:
         seq.num_cached_tokens = chunk_token_count
         
         # Track chunk information for attention layers
-        seq._chunk_token_count = chunk_token_count
-        
-        # Debug chunk positions
-        if hasattr(self, '_debug_positions') and self._debug_positions:
-            print(f"[DEBUG] Chunk positions:")
-            for i, chunk in enumerate(all_chunks):
-                print(f"  Chunk {i} ({chunk.chunk_type}): positions [{chunk.global_position_start}, {chunk.global_position_end}) - {chunk.global_position_end - chunk.global_position_start} tokens")
+        seq.active_chunks = all_chunks
         
         # Now we need to set up the sequence to use the pre-existing KV cache from chunks
-        if use_custom_kernel:
-            # For custom kernel path: create a combined page table from all chunks
-            combined_page_table = []
-            total_kv_length = 0
-            
-            # The `all_chunks` here should be the ones that have a KV cache.
-            # The query chunk is new and won't have one.
-            cached_chunks = [system_chunk] + context_chunks
+        # For custom kernel path: create a combined page table from all chunks
+        combined_page_table = []
+        total_kv_length = 0
+        
+        # The `all_chunks` here should be the ones that have a KV cache.
+        # The query chunk is new and won't have one.
+        cached_chunks = [system_chunk] + context_chunks
 
-            for chunk in cached_chunks:
-                if chunk.page_table is not None and chunk.token_ids:  # Skip empty chunks
-                    combined_page_table.extend(chunk.page_table)
-                    total_kv_length += chunk.kv_length
-            
-            # Set the sequence's page table to the combined one
-            seq.block_table = combined_page_table
-            
-            # Update page manager to track this sequence
-            if hasattr(self.scheduler.page_manager, 'seq_page_tables'):
-                # Pre-register the sequence with its page table
-                self.scheduler.page_manager.seq_page_tables[seq.seq_id] = combined_page_table
-                # Set the sequence length to the total KV cache length from chunks
-                self.scheduler.page_manager.seq_lengths[seq.seq_id] = total_kv_length
-            
-            # Store active chunks in sequence for custom kernel to use during decode
-            seq.active_chunks = all_chunks
-            
-            if hasattr(seq, '_full_context_length'):
-                seq._position_offset_for_decode = seq._full_context_length
-        else:
-            raise RuntimeError("Non-custom kernel path reached. Check use_custom_chunk_kernel setting.")
+        for chunk in cached_chunks:
+            if chunk.page_table is not None and chunk.token_ids:  # Skip empty chunks
+                combined_page_table.extend(chunk.page_table)
+                total_kv_length += chunk.kv_length
+        
+        # Set the sequence's page table to the combined one
+        seq.block_table = combined_page_table
+        
+        # Update page manager to track this sequence
+        if hasattr(self.scheduler.page_manager, 'seq_page_tables'):
+            # Pre-register the sequence with its page table
+            self.scheduler.page_manager.seq_page_tables[seq.seq_id] = combined_page_table
+            # Set the sequence length to the total KV cache length from chunks
+            self.scheduler.page_manager.seq_lengths[seq.seq_id] = total_kv_length
         
         self.scheduler.add(seq)
         
         if stream:
-            self._debug_generate_from_chunks = True
             yield from self._generate_stream(1)
-            self._debug_generate_from_chunks = False
         else:
-            self._debug_generate_from_chunks = True
             results = []
-            max_steps = sampling_params.max_tokens + 10  # Safety limit
-            step_count = 0
-            while len(results) < 1 and step_count < max_steps:
+            while len(results) < 1:
                 finished = self.step()
                 results.extend(finished)
-                step_count += 1
                 
             if results:
                 seq = results[0]
@@ -622,9 +562,6 @@ class LLMEngine:
                     "text": self.tokenizer.decode(completion_tokens) if completion_tokens else "",
                     "token_ids": completion_tokens
                 }
-                
-                self._debug_generate_from_chunks = False
                 yield result
             else:
-                self._debug_generate_from_chunks = False
                 yield {"text": "", "token_ids": []}

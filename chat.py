@@ -20,7 +20,6 @@ class FastChat:
     def __init__(
         self,
         model_path: str = "Qwen/Qwen2.5-0.5B-Instruct",
-        use_custom_kernels: bool = False,
         debug_tokens: bool = False,  # Show token IDs
     ):
         """Initialize the chat interface."""
@@ -32,15 +31,12 @@ class FastChat:
         expanded_path = os.path.expanduser(model_path)
 
         self.llm = LLM(
-            model=expanded_path,
-            device="cuda",
-            # Enable custom kernels if requested
-            model_kwargs={"use_custom_kernels": use_custom_kernels} if use_custom_kernels else {}
+            model=expanded_path
         )
 
         load_time = time.time() - start_time
         print(f" Done! ({load_time:.1f}s)")
-        print(f"Using {'custom kernels' if use_custom_kernels else 'standard implementation'}")
+        print(f"Using custom kernels")
         print()
 
         # Conversation history
@@ -263,8 +259,6 @@ class FastChat:
             print(f"\nModel: {self.llm.config.model}")
         if hasattr(self.llm, 'model_runner') and hasattr(self.llm.model_runner, 'model'):
             model = self.llm.model_runner.model
-            if hasattr(model, 'use_custom_kernels'):
-                print(f"Custom kernels: {'enabled' if model.use_custom_kernels else 'disabled'}")
 
     def clear_history(self):
         """Clear conversation history."""
@@ -349,11 +343,6 @@ Examples:
         help="Model to use (HuggingFace model name or local path)"
     )
     parser.add_argument(
-        "--custom-kernels",
-        action="store_true",
-        help="Enable custom kernels for 2.64x speedup"
-    )
-    parser.add_argument(
         "--debug-tokens",
         action="store_true",
         help="Show token IDs and special tokens in prompts and outputs"
@@ -362,16 +351,14 @@ Examples:
     args = parser.parse_args()
 
     # Show configuration
-    use_custom_kernels = args.custom_kernels
     print(f"Configuration:")
     print(f"  Model: {args.model}")
-    print(f"  Custom kernels: {'enabled' if use_custom_kernels else 'disabled'}")
+    print(f"  Custom kernels: enabled")
     print()
 
     # Create and run chat interface
     chat = FastChat(
         model_path=args.model,
-        use_custom_kernels=use_custom_kernels,
         debug_tokens=args.debug_tokens,
     )
 

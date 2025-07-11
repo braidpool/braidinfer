@@ -73,7 +73,6 @@ def main():
         llm = LLM(
             model_path if isinstance(model_path, str) else args.model_path,
             enforce_eager=True,
-            model_kwargs={"use_custom_kernels": False}
         )
         
         # Get the actual model

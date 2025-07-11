@@ -48,33 +48,6 @@ Models are incompatible when they have:
 
 Example: Qwen3-0.6B has K normalization weights up to 96.5x, which amplifies tiny numerical differences into completely different outputs.
 
-## Integration with Model Loading
-
-### Automatic Detection
-
-```python
-from nanovllm import LLM
-
-# Automatic compatibility checking
-llm = LLM(
-    "path/to/model",
-    model_kwargs={"use_custom_kernels": True}  # Will fall back if incompatible
-)
-```
-
-### Manual Override (Testing Only)
-
-```python
-# Force custom kernels (may produce gibberish!)
-llm = LLM(
-    "path/to/model",
-    model_kwargs={
-        "use_custom_kernels": True,
-        "force_custom_kernels": True  # Bypass compatibility check
-    }
-)
-```
-
 ## Programmatic Usage
 
 ```python

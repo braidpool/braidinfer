@@ -30,16 +30,12 @@ class ChunkedFastChat:
         # Create ChunkedLLM instance
         expanded_path = os.path.expanduser(model_path)
         
-        # Model kwargs no longer needed - custom kernels are always used
-        model_kwargs = {}
-        
         self.llm = ChunkedLLM(
             expanded_path,
             max_chunks=1000,
             chunk_memory_ratio=0.5,
             enable_deduplication=True,
             enforce_eager=True,
-            model_kwargs=model_kwargs
         )
         
         load_time = time.time() - start_time

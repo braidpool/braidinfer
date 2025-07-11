@@ -59,7 +59,7 @@ class TestChunkedLLMCoherence(unittest.TestCase):
                 self.chunked_llm = ChunkedLLM(
                     model_name,
                     num_kvcache_blocks=32,  # Small cache for testing
-                    model_kwargs={"use_custom_kernels": False}  # Disable custom kernels for compatibility
+                    model_kwargs={}  # No custom kernels needed for this test
                 )
                 self.model_used = model_name
                 print(f"Successfully loaded: {model_name}")

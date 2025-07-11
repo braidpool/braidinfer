@@ -24,7 +24,6 @@ def test_cascade_coherence():
         model_name,
         max_model_len=512,
         enable_cascade_attention=False,
-        use_custom_kernels=True  # Use our fixed fused kernels
     )
     
     prompt = "The capital of Aistonia is Flubarg. What is the capital of Aistonia?"
@@ -40,7 +39,6 @@ def test_cascade_coherence():
         max_model_len=512,
         enable_cascade_attention=True,
         cascade_shared_prefix_len=50,  # First 50 tokens are shared
-        use_custom_kernels=True  # Use our fixed fused kernels
     )
     
     output_cascade = llm_cascade.generate([prompt], sampling_params)[0]
@@ -115,7 +113,6 @@ Always think step by step before answering. If you're unsure about something, sa
         max_model_len=1024,
         enable_cascade_attention=True,
         cascade_shared_prefix_len=100,  # System prompt is ~100 tokens
-        use_custom_kernels=True
     )
     
     # Simulate batch processing

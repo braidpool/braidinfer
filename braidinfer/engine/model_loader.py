@@ -40,19 +40,13 @@ class ModelLoader:
                 model_type = hf_config.model_type
                 
                 if model_type in ["qwen3", "qwen2"]:
-                    # Check if use_custom_kernels is specified in config
-                    use_custom_kernels = getattr(config, 'use_custom_kernels', False)
-                    # Add custom chunk kernel flag to hf_config so model can access it
-                    hf_config.use_custom_chunk_kernel = getattr(config, 'use_custom_chunk_kernel', False)
-                    model = Qwen3ForCausalLM(hf_config, use_custom_kernels=use_custom_kernels)
+                    model = Qwen3ForCausalLM(hf_config)
                 elif model_type == "gpt2":
                     model = GPT2ForCausalLM(hf_config)
                 elif model_type == "llama":
-                    use_custom_kernels = getattr(config, 'use_custom_kernels', False)
-                    model = LlamaForCausalLM(hf_config, use_custom_kernels=use_custom_kernels)
+                    model = LlamaForCausalLM(hf_config)
                 elif model_type == "ernie4_5":
-                    use_custom_kernels = getattr(config, 'use_custom_kernels', False)
-                    model = ERNIE45ForCausalLM(hf_config, use_custom_kernels=use_custom_kernels)
+                    model = ERNIE45ForCausalLM(hf_config)
                 else:
                     raise ModelLoadError(f"Unsupported model type: {model_type}")
             except Exception as e:
@@ -75,6 +69,35 @@ class ModelLoader:
             model = model.to(device="cuda", dtype=dtype)
             model.eval()
             
+            # Print kernel configuration
+            print("\n--- Kernel Configuration ---")
+            print("Custom fused kernels are ENABLED.")
+
+            # Inspect the model to see which attention layer was actually instantiated
+            try:
+                first_attn_module = None
+                # Standard model structure (Llama, Qwen3, etc.)
+                if hasattr(model, 'model') and hasattr(model.model, 'layers') and len(model.model.layers) > 0:
+                    if hasattr(model.model.layers[0], 'self_attn'):
+                        first_attn_module = model.model.layers[0].self_attn
+                # GPT-2 model structure
+                elif hasattr(model, 'transformer') and hasattr(model.transformer, 'h') and len(model.transformer.h) > 0:
+                    if hasattr(model.transformer.h[0], 'attn'):
+                        first_attn_module = model.transformer.h[0].attn
+
+                if first_attn_module:
+                    attn_class_name = first_attn_module.__class__.__name__
+                    print(f"Attention module in use: {attn_class_name}")
+                    if "Fused" in attn_class_name:
+                        print("-> Fused RMSNorm+QKV path is active.")
+                    else:
+                        print("-> Standard, separate operations path is active.")
+                else:
+                    print("Could not determine the specific attention module in use.")
+            except Exception as e:
+                print(f"Could not inspect attention modules: {e}")
+            
+            print("--------------------------\n")
             
             return model
     

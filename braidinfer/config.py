@@ -23,8 +23,8 @@ class Config:
     chunk_persistence_dir: str | None = None
     
     # Custom kernel configuration
-    use_custom_kernels: bool = True  # Always True - this is the point of the project
-    use_custom_chunk_kernel: bool = True  # Always True - this is the point of the project
+    
+    
 
     def __post_init__(self):
         # Check if it's a local directory first

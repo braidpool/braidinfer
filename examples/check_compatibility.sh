@@ -19,7 +19,7 @@ EXIT_CODE=$?
 case $EXIT_CODE in
     0)
         echo -e "\n✓ Model is COMPATIBLE with fused kernels"
-        echo "You can safely use: model_kwargs={'use_custom_kernels': True}"
+        echo "You can safely use Braidinfer."
         ;;
     1)
         echo -e "\n⚠ Model has WARNINGS for fused kernels"
@@ -44,7 +44,7 @@ from nanovllm import LLM
 llm = LLM(
     "$MODEL_PATH",
     model_kwargs={
-        "use_custom_kernels": $([ $EXIT_CODE -eq 0 ] && echo "True" || echo "False")
+        
     }
 )
 EOF

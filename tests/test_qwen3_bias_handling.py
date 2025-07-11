@@ -95,7 +95,7 @@ class TestQwen3BiasHandling(unittest.TestCase):
     def test_model_initialization_respects_config(self):
         """Test that model initialization respects attention_bias config."""
         # Create model with custom kernels
-        model = Qwen3ForCausalLM(self.config, use_custom_kernels=True)
+        model = Qwen3ForCausalLM(self.config)
         
         # Check that attention layers are configured correctly
         for i, layer in enumerate(model.model.layers):

@@ -47,10 +47,6 @@ class ChunkedLLM:
             total_blocks = 256
         chunk_blocks = int(total_blocks * chunk_memory_ratio)
         
-        # Initialize base LLM
-        # Check if custom chunk kernel is requested
-        use_custom_chunk_kernel = llm_kwargs.get('model_kwargs', {}).get('use_custom_chunk_kernel', False)
-        
         # Create LLM instance (custom kernels are now always used)
         self.llm = LLM(
             model_path,
@@ -286,8 +282,9 @@ class ChunkedLLM:
                 ctx_chunk.cached_position_start = ctx_chunk.global_position_start
                 self._prefill_chunk(ctx_chunk)
         
-        # The query chunk is NEW, so it is NOT prefilled. Its KV cache will be
-        # computed as part of the main generation call.
+        if not query_chunk.kv_cache_allocated:
+            query_chunk.cached_position_start = query_chunk.global_position_start
+            self._prefill_chunk(query_chunk)
         
         # Create composition (NO STRING BUILDING)
         composition = {
@@ -307,9 +304,7 @@ class ChunkedLLM:
             sp = SamplingParams(**sampling_params)
         
         # Generate using engine's new method (NO STRING CONCATENATION)
-        # Use custom kernels as intended
-        use_custom_kernel = hasattr(self.llm, 'config') and getattr(self.llm.config, 'use_custom_chunk_kernel', True)
-        result = self.llm.generate_from_chunks(composition, sp, stream, use_custom_kernel=use_custom_kernel)
+        result = self.llm.generate_from_chunks(composition, sp, stream)
         
         # If not streaming, consume the generator to get the final result
         if not stream:

@@ -16,7 +16,6 @@ def fused_rmsnorm_qkv_bias_kernel(
     input_ptr,      # [seq_len, hidden_dim]
     norm_weight_ptr,  # [hidden_dim]
     qkv_weight_ptr,   # [qkv_dim, hidden_dim]
-    qkv_bias_ptr,     # [qkv_dim] - NEW: bias parameter
     # Output tensor
     output_ptr,     # [seq_len, qkv_dim]
     # Dimensions
@@ -30,8 +29,6 @@ def fused_rmsnorm_qkv_bias_kernel(
     qkv_stride_in,
     output_stride_seq,
     output_stride_qkv,
-    # Flags
-    has_bias: tl.constexpr,  # Whether bias is present
     # Hyperparameters
     eps: tl.constexpr,
     BLOCK_SIZE_M: tl.constexpr,
@@ -39,12 +36,7 @@ def fused_rmsnorm_qkv_bias_kernel(
     BLOCK_SIZE_K: tl.constexpr,
 ):
     """
-    Fused RMSNorm + QKV kernel with bias support.
-    
-    Computation order:
-    1. Apply RMSNorm to input
-    2. Compute QKV projection
-    3. Add QKV bias (if present)
+    Fused RMSNorm + QKV kernel. Bias is handled outside the kernel.
     """
     pid_m = tl.program_id(0)  # Sequence dimension
     pid_n = tl.program_id(1)  # QKV output dimension
@@ -115,16 +107,6 @@ def fused_rmsnorm_qkv_bias_kernel(
         # Matrix multiply in float32
         acc_out += tl.dot(normalized_f32, weight_tile.to(tl.float32).trans())
     
-    # Step 3: Add bias if present
-    if has_bias:
-        bias_tile = tl.load(
-            qkv_bias_ptr + col_idx,
-            mask=col_mask,
-            other=0.0
-        )
-        # Add bias in float32
-        acc_out += bias_tile.to(tl.float32)[None, :]
-    
     # Store output in float32
     output_mask = row_mask[:, None] & col_mask[None, :]
     tl.store(
@@ -170,8 +152,13 @@ class FusedRMSNormQKVWithBias:
         input = input.contiguous()
         norm_weight = norm_weight.contiguous()
         qkv_weight = qkv_weight.contiguous()
-        if qkv_bias is not None:
+        if qkv_bias is None:
+            # Create a dummy zero tensor for bias if it's not provided
+            qkv_bias = torch.zeros(qkv_dim, dtype=input.dtype, device=input.device)
+        else:
             qkv_bias = qkv_bias.contiguous()
+            # Sanitize for non-finite values before they reach the kernel
+            qkv_bias = torch.nan_to_num(qkv_bias, nan=0.0, posinf=1e10, neginf=-1e10)
             # Check for extreme bias values that could cause numerical issues
             bias_max = qkv_bias.abs().max().item()
             if bias_max > 1e10:
@@ -203,7 +190,6 @@ class FusedRMSNormQKVWithBias:
             input,
             norm_weight,
             qkv_weight,
-            qkv_bias if qkv_bias is not None else input,  # Dummy pointer if no bias
             output,
             # Dimensions
             batch_seq_len,
@@ -216,14 +202,16 @@ class FusedRMSNormQKVWithBias:
             qkv_weight.stride(1),
             output.stride(0),
             output.stride(1),
-            # Flags
-            has_bias=qkv_bias is not None,
             # Hyperparameters
             eps=eps,
             BLOCK_SIZE_M=BLOCK_SIZE_M,
             BLOCK_SIZE_N=BLOCK_SIZE_N,
             BLOCK_SIZE_K=BLOCK_SIZE_K,
         )
+        
+        # Add bias in PyTorch after kernel execution
+        if qkv_bias is not None:
+            output += qkv_bias.to(torch.float32)
         
         # Split QKV
         q_dim = num_q_heads * head_dim
