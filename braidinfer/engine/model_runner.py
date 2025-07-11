@@ -95,13 +95,14 @@ class ModelRunner:
         seq_lens = []
         
         for seq in seqs:
-            tokens = seq.prompt_token_ids
-            
-            # For chunk-based generation, positions should start from 0
-            # since the sequence already represents the complete context
-            # The _chunk_token_count offset was causing wrong RoPE positions
-            position_offset = 0
-            
+            # If the sequence has cached tokens, only prefill the new ones.
+            if seq.num_cached_tokens > 0:
+                tokens = seq.token_ids[seq.num_cached_tokens:]
+                position_offset = seq.num_cached_tokens
+            else:
+                tokens = seq.prompt_token_ids
+                position_offset = 0
+
             positions_list = list(range(position_offset, position_offset + len(tokens)))
             
             input_ids.extend(tokens)
@@ -134,12 +135,8 @@ class ModelRunner:
         for seq in seqs:
             input_ids.append(seq.last_token)
             
-            # Check if this sequence has a position offset for decode
-            if hasattr(seq, '_position_offset_for_decode'):
-                # For chunk-based generation, positions continue from the full context
-                position = seq._position_offset_for_decode + len(seq) - seq.num_prompt_tokens - 1
-            else:
-                position = len(seq) - 1
+            # The position is simply the current length of the sequence.
+            position = len(seq) - 1
             
             positions.append(position)
         
@@ -200,7 +197,8 @@ class ModelRunner:
                 cu_seqlens_q=cu_seqlens_q,
                 cascade_data=None,  # No longer using cascade data
                 active_chunks=active_chunks,
-                kv_cache=self.page_manager.kv_cache if self.page_manager else None
+                kv_cache=self.page_manager.kv_cache if self.page_manager else None,
+                positions=positions
             )
             
             # Run model

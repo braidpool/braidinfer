@@ -286,9 +286,8 @@ class ChunkedLLM:
                 ctx_chunk.cached_position_start = ctx_chunk.global_position_start
                 self._prefill_chunk(ctx_chunk)
         
-        if not query_chunk.kv_cache_allocated:
-            query_chunk.cached_position_start = query_chunk.global_position_start
-            self._prefill_chunk(query_chunk)
+        # The query chunk is NEW, so it is NOT prefilled. Its KV cache will be
+        # computed as part of the main generation call.
         
         # Create composition (NO STRING BUILDING)
         composition = {

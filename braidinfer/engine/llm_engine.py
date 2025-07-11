@@ -462,49 +462,75 @@ class LLMEngine:
         # Prepare all chunks in order
         all_chunks = [system_chunk] + context_chunks + [query_chunk]
         
-        # Calculate global positions for each chunk
-        current_position = 0
-        for chunk in all_chunks:
-            if chunk.token_ids:  # Skip empty chunks
-                chunk.global_position_start = current_position
-                chunk.global_position_end = current_position + len(chunk.token_ids)
-                current_position = chunk.global_position_end
+        # --- START REFACTORED PROMPT CONSTRUCTION ---
+        
+        # 1. Reconstruct the conversation from raw chunk content
+        messages = []
+        # Map ChunkType to role, assuming metadata['role'] exists
+        # A more robust solution might use ChunkType directly
+        role_map = {
+            "system_prompt": "system",
+            "context": "user", # Assuming context chunks are user messages for now
+            "query": "user",
+            "output": "assistant"
+        }
+
+        # Add system prompt if it has content
+        if system_chunk and system_chunk.content:
+            messages.append({"role": "system", "content": system_chunk.content})
+
+        # Add context and query chunks
+        for chunk in context_chunks + [query_chunk]:
+            if chunk and chunk.content:
+                role = chunk.metadata.get("role", "user") # Default to user
+                messages.append({"role": role, "content": chunk.content})
+
+        # 2. Apply the chat template to the entire conversation at once
+        prompt_text = self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=True  # This is crucial
+        )
+        
+        # 3. Tokenize the final, correct prompt
+        all_token_ids = self.tokenizer.encode(prompt_text)
+        
+        # --- END REFACTORED PROMPT CONSTRUCTION ---
+
+        # We calculate the length of the prompt part that is already cached.
+        cached_messages = []
+        if system_chunk and system_chunk.content:
+            cached_messages.append({"role": "system", "content": system_chunk.content})
+        for chunk in context_chunks:
+             if chunk and chunk.content:
+                role = chunk.metadata.get("role", "user")
+                cached_messages.append({"role": role, "content": chunk.content})
+
+        if cached_messages:
+            prompt_from_cached_chunks = self.tokenizer.apply_chat_template(
+                cached_messages, tokenize=False, add_generation_prompt=False
+            )
+            # This count can sometimes be off by one due to how templates add spaces/newlines.
+            # We find the tokenized cached prompt within the full prompt to get the exact boundary.
+            full_prompt_tokens = self.tokenizer.encode(prompt_text)
+            cached_tokens = self.tokenizer.encode(prompt_from_cached_chunks)
+            
+            if not cached_tokens:
+                chunk_token_count = 0
             else:
-                # Empty chunk - set both to current position
-                chunk.global_position_start = current_position
-                chunk.global_position_end = current_position
-        
-        # Collect all token IDs from chunks (skip empty chunks)
-        all_token_ids = []
-        for chunk in all_chunks:
-            if chunk.token_ids:  # Skip empty chunks
-                all_token_ids.extend(chunk.token_ids)
-        
-        # Track how many tokens are from chunks (and thus in KV cache)
-        chunk_token_count = len(all_token_ids)
-        
-        # CRITICAL: Add generation prompt tokens
-        # This tells the model it's the assistant's turn to respond
-        # First, build a minimal message list to get the generation prompt
-        messages = [
-            {"role": "system", "content": ""},
-            {"role": "user", "content": ""}
-        ]
-        template_with_prompt = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        template_without_prompt = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=False
-        )
-        
-        # Find the generation prompt by comparing the two
-        generation_prompt_tokens = []
-        if template_with_prompt != template_without_prompt:
-            # Extract just the generation prompt part
-            generation_prompt = template_with_prompt[len(template_without_prompt):]
-            generation_prompt_tokens = self.tokenizer.encode(generation_prompt, add_special_tokens=False)
-            all_token_ids.extend(generation_prompt_tokens)
-        
+                # Find the sequence of cached_tokens in full_prompt_tokens
+                # This is a more robust way to find the split point.
+                chunk_token_count = -1
+                for i in range(len(full_prompt_tokens) - len(cached_tokens) + 1):
+                    if full_prompt_tokens[i:i+len(cached_tokens)] == cached_tokens:
+                        chunk_token_count = len(cached_tokens)
+                        break
+                if chunk_token_count == -1:
+                    # Fallback if sequence not found (should not happen)
+                    chunk_token_count = len(cached_tokens)
+        else:
+            chunk_token_count = 0
+
         # Create a sequence that represents what needs to be processed
         from braidinfer.engine.sequence import Sequence
         
@@ -513,8 +539,7 @@ class LLMEngine:
             yield {"text": "", "token_ids": []}
             return
         
-        # CRITICAL FIX: Create sequence with ALL tokens but mark chunk tokens as cached
-        # This ensures the model sees the full context while leveraging chunk KV cache
+        # Create sequence with ALL tokens but mark chunk tokens as cached
         seq = Sequence(
             token_ids=all_token_ids,
             sampling_params=sampling_params
@@ -529,15 +554,6 @@ class LLMEngine:
         # Track chunk information for attention layers
         seq._chunk_token_count = chunk_token_count
         
-        # Debug: Check what tokens we're processing (commented out for cleaner output)
-        # print(f"[DEBUG] Sequence tokens to prefill: {len(seq.token_ids)} tokens: {seq.token_ids}")
-        # print(f"[DEBUG] Full context: {len(all_token_ids)} tokens (chunks: {chunk_token_count}, prompt: {len(generation_prompt_tokens)})")
-        
-        # Debug chunk contents (commented out for cleaner output)
-        # print(f"[DEBUG] Chunk contents:")
-        # for i, chunk in enumerate(all_chunks):
-        #     print(f"  Chunk {i} ({chunk.chunk_type}): '{chunk.content[:50]}...' ({len(chunk.token_ids)} tokens)")
-        
         # Debug chunk positions
         if hasattr(self, '_debug_positions') and self._debug_positions:
             print(f"[DEBUG] Chunk positions:")
@@ -550,7 +566,11 @@ class LLMEngine:
             combined_page_table = []
             total_kv_length = 0
             
-            for chunk in all_chunks:
+            # The `all_chunks` here should be the ones that have a KV cache.
+            # The query chunk is new and won't have one.
+            cached_chunks = [system_chunk] + context_chunks
+
+            for chunk in cached_chunks:
                 if chunk.page_table is not None and chunk.token_ids:  # Skip empty chunks
                     combined_page_table.extend(chunk.page_table)
                     total_kv_length += chunk.kv_length
@@ -558,50 +578,28 @@ class LLMEngine:
             # Set the sequence's page table to the combined one
             seq.block_table = combined_page_table
             
-            # Keep the num_cached_tokens value set earlier (chunk tokens are cached)
-            
             # Update page manager to track this sequence
             if hasattr(self.scheduler.page_manager, 'seq_page_tables'):
                 # Pre-register the sequence with its page table
-                # This prevents the scheduler from trying to allocate new pages
                 self.scheduler.page_manager.seq_page_tables[seq.seq_id] = combined_page_table
                 # Set the sequence length to the total KV cache length from chunks
                 self.scheduler.page_manager.seq_lengths[seq.seq_id] = total_kv_length
-                
-                # print(f"[DEBUG] Pre-registered seq {seq.seq_id} with {len(combined_page_table)} pages")
-                pass
             
-            # Debug info (commented out)
-            # print(f"[DEBUG] KV cached length: {total_kv_length}, num_cached_tokens: {seq.num_cached_tokens}")
-            # print(f"[DEBUG] EOS token: {self.config.eos}")
-                
             # Store active chunks in sequence for custom kernel to use during decode
             seq.active_chunks = all_chunks
             
-            # Also need to handle the fact that after prefill, positions will continue from full context
             if hasattr(seq, '_full_context_length'):
-                # This will be used for decode position calculation
                 seq._position_offset_for_decode = seq._full_context_length
         else:
-            # Non-custom kernel path - should not normally be reached with custom kernels enabled
             raise RuntimeError("Non-custom kernel path reached. Check use_custom_chunk_kernel setting.")
         
-        # Add sequence to scheduler normally
-        # print(f"[DEBUG] Before scheduler.add: seq {seq.seq_id} has {len(seq.token_ids)} tokens, status={seq.status}")
         self.scheduler.add(seq)
-        # print(f"[DEBUG] After scheduler.add: waiting={len(self.scheduler.waiting)}, running={len(self.scheduler.running)}")
         
         if stream:
-            # Use the standard streaming generation method
-            # print(f"[DEBUG] Starting streaming generation")
             self._debug_generate_from_chunks = True
-            
-            # Yield from the streaming generator
             yield from self._generate_stream(1)
-            
             self._debug_generate_from_chunks = False
         else:
-            # Use standard non-streaming generation
             self._debug_generate_from_chunks = True
             results = []
             max_steps = sampling_params.max_tokens + 10  # Safety limit
@@ -611,28 +609,13 @@ class LLMEngine:
                 results.extend(finished)
                 step_count += 1
                 
-                # Debug: Check if we're stuck
-                if step_count <= 3 and hasattr(self, '_debug_generate_from_chunks'):
-                    print(f"[DEBUG] Step {step_count}: {len(finished)} finished sequences")
-                    if hasattr(self.scheduler, 'running') and self.scheduler.running:
-                        for seq in self.scheduler.running:
-                            print(f"[DEBUG] Running seq {seq.seq_id}: {len(seq.token_ids)} tokens, "
-                                  f"prompt_tokens={seq.num_prompt_tokens}, status={seq.status}")
-                    if hasattr(self.scheduler, 'waiting') and self.scheduler.waiting:
-                        print(f"[DEBUG] {len(self.scheduler.waiting)} sequences waiting")
-            
-            # Extract the completion tokens from the finished sequence
             if results:
                 seq = results[0]
-                # Get only the newly generated tokens
-                # Now the sequence contains ALL tokens (chunks + generation prompt + new tokens)
-                # Completion tokens are everything after the original prompt
                 original_prompt_length = len(all_token_ids)
                 
                 if len(seq.token_ids) > original_prompt_length:
                     completion_tokens = seq.token_ids[original_prompt_length:]
                 else:
-                    # No new tokens generated
                     completion_tokens = []
                 
                 result = {
@@ -640,11 +623,8 @@ class LLMEngine:
                     "token_ids": completion_tokens
                 }
                 
-                # Disable debug mode
                 self._debug_generate_from_chunks = False
-                
                 yield result
             else:
-                # Disable debug mode
                 self._debug_generate_from_chunks = False
                 yield {"text": "", "token_ids": []}

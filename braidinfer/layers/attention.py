@@ -161,9 +161,15 @@ class Attention(nn.Module):
                 if hasattr(context.page_manager, 'page_size'):
                     self.cascade_attention.page_size = context.page_manager.page_size
                 
+                # Get the query positions from the context
+                query_positions = context.positions
+                if query_positions is None:
+                    raise ValueError("InferenceContext.positions is None, cannot proceed with CascadeAttention.")
+
                 # Run cascade attention with k_norm
                 output = self.cascade_attention.forward(
                     query=q,
+                    query_positions=query_positions,
                     kv_cache=self.kv_cache,
                     cascade_levels=cascade_levels,
                     layer_idx=self.layer_idx,
@@ -176,14 +182,22 @@ class Attention(nn.Module):
         past_k, past_v = self._get_past_kv(seq, context.page_manager, context)
         
         if past_k is not None:
-            # K normalization is already applied when storing to cache
-            # No need to apply it again - this ensures consistency
             k_full = torch.cat([past_k, k], dim=0)
             v_full = torch.cat([past_v, v], dim=0)
         else:
-            # For fresh K, normalization was already applied in Qwen3AttentionFused
             k_full = k
             v_full = v
+
+        # Apply K-normalization here, just before attention calculation.
+        if self.k_norm:
+            k_full = self.k_norm(k_full)
+
+        # Apply Rotary Embeddings to K here. Q is already rotated.
+        if self.rotary_emb:
+            # The 'q' parameter to rotary_emb is a dummy, as we only need to rotate k.
+            # The positions are taken from the context.
+            dummy_q_for_rope = torch.empty_like(k_full)
+            _, k_full = self.rotary_emb(context.positions, dummy_q_for_rope, k_full)
 
         if self.num_kv_heads != self.num_heads:
             heads_per_kv = self.num_heads // self.num_kv_heads

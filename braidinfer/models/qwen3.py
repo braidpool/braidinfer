@@ -94,12 +94,12 @@ class Qwen3Attention(nn.Module):
         if self.use_fused_qkv and layernorm_weight is not None:
             # Use fused kernel
             from braidinfer.kernels.fused_rmsnorm_qkv_mixed_precision import FusedRMSNormQKVMixedPrecision
-            
+
             # Ensure 2D input
             orig_shape = hidden_states.shape
             if hidden_states.dim() == 3:
                 hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-            
+
             q, k, v = FusedRMSNormQKVMixedPrecision.forward(
                 hidden_states,
                 layernorm_weight,
@@ -109,16 +109,16 @@ class Qwen3Attention(nn.Module):
                 self.num_kv_heads,
                 eps=self.rms_norm_eps
             )
-            
+
             # Apply Q/K normalization
             q = self.q_norm(q.float()).to(hidden_states.dtype)
             k = self.k_norm(k.float()).to(hidden_states.dtype)
-            
-            # Flatten for rotary
+
+            # Reshape q, k, v back to [batch_seq_len, hidden_dim] for rotary embeddings
             batch_seq_len = q.shape[0]
-            q = q.view(batch_seq_len, -1)
-            k = k.view(batch_seq_len, -1)
-            v = v.view(batch_seq_len, -1)
+            q_flat = q.view(batch_seq_len, -1)
+            k_flat = k.view(batch_seq_len, -1)
+            v_flat = v.view(batch_seq_len, -1)
         else:
             # Standard path
             qkv = self.qkv_proj(hidden_states)
@@ -159,19 +159,19 @@ class Qwen3AttentionFused(nn.Module):
         self.num_kv_heads = num_kv_heads
         self.use_fused_output = use_fused_output
         self.qkv_bias = qkv_bias
-        
+
         # Determine head dimensions
         if head_dim is None:
             self.head_dim = hidden_size // num_heads
         else:
             self.head_dim = head_dim
-            
+
         self.total_num_heads = num_heads
         self.total_num_kv_heads = num_kv_heads
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        
+
         # Store norm eps for fused kernel (weight will be passed from decoder layer)
         self.rms_norm_eps = rms_norm_eps
         self.qkv_proj = QKVParallelLinear(
@@ -193,14 +193,14 @@ class Qwen3AttentionFused(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
-        
+
         # Always create standard attention module for prefill
         # Custom chunk kernel is used automatically when active_chunks present
         from braidinfer.layers.attention import Attention
-        
+
         self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
         self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
-        
+
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -210,12 +210,6 @@ class Qwen3AttentionFused(nn.Module):
             k_norm=self.k_norm,
             rotary_emb=self.rotary_emb
         )
-        
-        # Pre-check for extreme K normalization weights at initialization
-        # This avoids the check during forward pass
-        self._use_standard_computation = None  # Will be set after weights are loaded
-        self._k_norm_scale = 1.0  # Scale factor for extreme K norm weights
-        self._attention_scale_compensation = 1.0  # Compensation for attention scores
 
     def forward(
         self,
@@ -227,26 +221,26 @@ class Qwen3AttentionFused(nn.Module):
     ) -> torch.Tensor:
         """
         Forward pass with fused RMSNorm+QKV kernel.
-        
+
         Note: This expects unnormalized hidden_states as input.
         """
         # CRITICAL: Save the input dtype - this is what we must output
         input_dtype = hidden_states.dtype
-        
+
         # Use fused kernel for RMSNorm + QKV projection
         # Ensure input is 2D for kernel
         batch_size = hidden_states.shape[0] if hidden_states.dim() == 3 else 1
         seq_len = hidden_states.shape[1] if hidden_states.dim() == 3 else hidden_states.shape[0]
         if hidden_states.dim() == 3:
             hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        
+
         # Call fused kernel (no transpose needed - weight is already [qkv_dim, hidden_dim])
         if layernorm_weight is None:
             raise ValueError("layernorm_weight must be provided for fused kernel")
-        
+
         # Use the mixed precision fused kernel
         from braidinfer.kernels.fused_rmsnorm_qkv_mixed_precision import FusedRMSNormQKVMixedPrecision
-        
+
         q, k, v = FusedRMSNormQKVMixedPrecision.forward(
             hidden_states,
             layernorm_weight,
@@ -256,118 +250,53 @@ class Qwen3AttentionFused(nn.Module):
             self.num_kv_heads,
             eps=self.rms_norm_eps
         )
-        
+
         # Bias is now handled inside the fused kernel
-        
-        # CRITICAL FIX: Ensure Q, K, V have consistent shapes regardless of path
-        # The fused kernel returns [seq_len, num_heads, head_dim]
-        # but the rest of the code expects them in head format for normalization
-        if not hasattr(q, 'view'):
-            # If q is not a tensor, something is wrong
-            raise ValueError(f"Expected tensor, got {type(q)}")
-            
-        # Apply Q normalization in float32 for stability
-        q_normed = self.q_norm(q.float() if q.dtype != torch.float32 else q)
-        
-        # CRITICAL FIX: Store K in cache BEFORE normalization to keep values in float16 range
-        # K normalization will be applied during attention computation
-        
-        # Check if this layer has extreme K norm weights
-        if self._use_standard_computation is None:
-            k_norm_max = self.k_norm.weight.max().item()
-            self._use_standard_computation = k_norm_max > 20.0
-            self._k_norm_scale = min(k_norm_max / 10.0, 10.0) if k_norm_max > 20.0 else 1.0
-        
-        # Ensure scale is set even if _use_standard_computation was pre-set
-        if self._use_standard_computation and self._k_norm_scale == 1.0:
-            k_norm_max = self.k_norm.weight.max().item()
-            self._k_norm_scale = min(k_norm_max / 10.0, 10.0)
-        
-        # CRITICAL: Apply K normalization now and store normalized K in cache
-        # This ensures consistency between cascade and standard attention paths
-        k_normed = self.k_norm(k.float() if k.dtype != torch.float32 else k).to(input_dtype)
-        
-        # Convert to appropriate precision
-        # Always convert to input dtype (which might be bfloat16)
-        q = q_normed.to(input_dtype)
-        k = k_normed  # Use normalized K for caching
-        
-        # CRITICAL FIX: Ensure V is properly converted and not reused
-        # Make a deep copy to prevent any aliasing issues
-        v = v.to(input_dtype).detach().clone().contiguous()
-        
-        
+
         # Reshape q, k, v back to [batch_seq_len, hidden_dim] for rotary embeddings
         batch_seq_len = q.shape[0]
         q_flat = q.view(batch_seq_len, -1)
         k_flat = k.view(batch_seq_len, -1)
         v_flat = v.view(batch_seq_len, -1)
-        
+
         # Flatten positions to match batch_seq_len dimension
         if positions.dim() == 2:
             positions_flat = positions.reshape(-1)
         else:
             positions_flat = positions
+
+        # CRITICAL FIX: Apply RoPE to the normalized query and the UN-NORMALIZED key.
+        # The K-normalization will be applied inside the attention mechanism.
+        q_rotated, _ = self.rotary_emb(positions_flat, q_flat, k_flat)
         
-        # Ensure Q/K/V shapes are consistent before attention
-        if q_flat.shape[-1] != self.q_size:
-            raise ValueError(f"Q shape mismatch: got {q_flat.shape[-1]}, expected {self.q_size}")
-        if k_flat.shape[-1] != self.kv_size:
-            raise ValueError(f"K shape mismatch: got {k_flat.shape[-1]}, expected {self.kv_size}")
-        if v_flat.shape[-1] != self.kv_size:
-            raise ValueError(f"V shape mismatch: got {v_flat.shape[-1]}, expected {self.kv_size}")
-        
-        # Apply rotary embeddings
-        q_flat, k_flat = self.rotary_emb(positions_flat, q_flat, k_flat)
-        
-        # Ensure all tensors are contiguous before passing to attention
-        # This fixes the stride mismatch issue with FlashInfer
-        q_flat = q_flat.contiguous()
-        k_flat = k_flat.contiguous()
-        v_flat = v_flat.contiguous()
-        
-        # NOTE: For KV caching, we should store k_unnormalized (before K norm)
-        # This keeps values in float16 range and applies K norm during attention
-        # Context/cache handling would happen in the attention module
-        
-        # Ensure tensors are in the expected dtype for attention module
-        # The attention module expects the model's dtype, not float32
-        if q_flat.dtype != input_dtype:
-            q_flat = q_flat.to(input_dtype)
-        if k_flat.dtype != input_dtype:
-            k_flat = k_flat.to(input_dtype)
-        if v_flat.dtype != input_dtype:
-            v_flat = v_flat.to(input_dtype)
-        
-        # Apply attention with proper K normalization handling
-        
-        # Use standard attention - chunks are handled in the attention layer via CascadeAttention
-        attn_output = self.attn(q_flat, k_flat, v_flat, context)
-        
+        # Pass the rotated query and the ORIGINAL k and v to the attention layer.
+        # The attention layer is responsible for caching k/v and applying k-norm.
+        attn_output = self.attn(q_rotated, k_flat, v_flat, context)
+
         # Output projection
         if self.use_fused_output and residual is not None:
             # Use fused output projection + residual
             from braidinfer.kernels.fused_attention_output import FusedAttentionOutput
-            
+
             # Reshape attn_output if needed
             attn_shape = attn_output.shape
             if attn_output.dim() == 2:
                 attn_output = attn_output.unsqueeze(0).unsqueeze(0)  # Add batch and seq dims
             elif attn_output.dim() == 3:
                 attn_output = attn_output.unsqueeze(0)  # Add batch dim
-                
+
             # Ensure residual has same shape
             if residual.dim() == 2:
                 residual = residual.unsqueeze(0).unsqueeze(0)
             elif residual.dim() == 3:
                 residual = residual.unsqueeze(0)
-                
+
             output = FusedAttentionOutput.forward(
                 attn_output,
                 self.o_proj.weight,
                 residual
             )
-            
+
             # Reshape back to original dimensions
             if len(attn_shape) == 2:
                 output = output.squeeze(0).squeeze(0)
@@ -376,12 +305,12 @@ class Qwen3AttentionFused(nn.Module):
         else:
             # Standard output projection
             output = self.o_proj(attn_output)
-        
+
         # CRITICAL: Ensure output is in input dtype for residual connection
         # For extended precision layers, convert back only after projection
         if output.dtype != input_dtype:
             output = output.to(input_dtype)
-            
+
         return output
 
 
@@ -460,7 +389,7 @@ class Qwen3DecoderLayer(nn.Module):
         context: 'InferenceContext' = None,
     ) -> torch.Tensor:
         residual = hidden_states
-        
+
         if self.use_custom_kernels:
             # Pass layernorm weight for fused kernel
             hidden_states = self.self_attn(positions, hidden_states, context, layernorm_weight=self.input_layernorm.weight)
@@ -470,7 +399,7 @@ class Qwen3DecoderLayer(nn.Module):
             hidden_states = self.input_layernorm(hidden_states)
             hidden_states = self.self_attn(positions, hidden_states, context)
             hidden_states = residual + hidden_states
-            
+
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
@@ -486,7 +415,7 @@ class Qwen3Model(nn.Module):
         self.use_custom_kernels = use_custom_kernels
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
         self.layers = nn.ModuleList(
-            [Qwen3DecoderLayer(config, layer_idx, use_custom_kernels) 
+            [Qwen3DecoderLayer(config, layer_idx, use_custom_kernels)
              for layer_idx in range(config.num_hidden_layers)]
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -522,15 +451,6 @@ class Qwen3ForCausalLM(nn.Module):
         self.use_custom_kernels = use_custom_kernels
         self.model = Qwen3Model(config, use_custom_kernels)
         self.lm_head = ParallelLMHead(config.vocab_size, config.hidden_size, bias=False)
-    
-    def check_extreme_weights(self):
-        """Check for extreme K normalization weights after model is loaded."""
-        if self.use_custom_kernels:
-            for i, layer in enumerate(self.model.layers):
-                if hasattr(layer.self_attn, 'k_norm') and hasattr(layer.self_attn.k_norm, 'weight'):
-                    if layer.self_attn.k_norm.weight is not None:
-                        max_weight = layer.self_attn.k_norm.weight.max().item()
-                        layer.self_attn._use_standard_computation = max_weight > 20
 
     def forward(
         self,

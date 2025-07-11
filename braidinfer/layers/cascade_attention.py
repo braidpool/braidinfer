@@ -47,8 +47,9 @@ class CascadeAttention:
         # Store RoPE instance for differential RoPE
         self.rotary_emb = rotary_emb
         
-    def forward(self, 
-                query: torch.Tensor,           # [num_tokens * num_heads * head_dim] or [num_tokens, num_heads, head_dim]
+    def forward(self,
+                query: torch.Tensor,           # [num_tokens, num_heads, head_dim]
+                query_positions: torch.Tensor, # [num_tokens]
                 kv_cache: torch.Tensor,        # [num_pages, 2, page_size, num_kv_heads, head_dim]
                 cascade_levels: List[CascadeLevel],
                 layer_idx: int,
@@ -172,6 +173,10 @@ class CascadeAttention:
                             _, page_k_rotated = self.rotary_emb(pos_diff, dummy_q, page_k_reshaped)
                             page_k = page_k_rotated.reshape(original_shape)
                     
+                    # Apply K-normalization AFTER loading from cache and applying RoPE.
+                    if k_norm is not None:
+                        page_k = k_norm(page_k)
+
                     # Handle GQA: expand KV heads to match query heads
                     if self.num_kv_heads != self.num_heads:
                         heads_per_kv = self.num_heads // self.num_kv_heads
@@ -182,10 +187,9 @@ class CascadeAttention:
                     page_k = page_k.transpose(0, 1)  # [num_heads, tokens, head_dim]
                     page_v = page_v.transpose(0, 1)  # [num_heads, tokens, head_dim]
                     
-                    # Calculate global positions for queries and keys
-                    # Query positions: assume queries are at the end of context (for generation)
-                    query_positions = torch.full((batch_size,), total_context_length, 
-                                                dtype=torch.int64, device=device)
+                    # Use the provided query positions for causal masking.
+                    # This is critical for prefill where queries have different positions.
+                    # For decode, all queries will have the same, single position.
                     
                     # Key positions for this page: start from cumulative position + page offset
                     tokens_before_page = local_page_idx * self.page_size
@@ -196,16 +200,15 @@ class CascadeAttention:
                         dtype=torch.int64, device=device
                     )
                     
-                    # Use high-performance Triton kernel for online softmax update
                     online_softmax_update(
-                        query=query,                    # [num_heads, batch_size, head_dim]
-                        key=page_k,                     # [num_heads, tokens_on_page, head_dim]
-                        value=page_v,                   # [num_heads, tokens_on_page, head_dim]
-                        m_i=m_i,                        # [num_heads, batch_size] (modified in-place)
-                        l_i=l_i,                        # [num_heads, batch_size] (modified in-place)
-                        acc_i=acc_i,                    # [num_heads, batch_size, head_dim] (modified in-place)
-                        query_positions=query_positions, # [batch_size]
-                        key_positions=key_positions,     # [tokens_on_page]
+                        query=query,
+                        key=page_k,
+                        value=page_v,
+                        m_i=m_i,
+                        l_i=l_i,
+                        acc_i=acc_i,
+                        query_positions=query_positions, # Use the passed-in positions
+                        key_positions=key_positions,
                         scale=self.scale,
                         apply_causal_mask=causal_mask
                     )

@@ -9,6 +9,7 @@ import os
 import signal
 import sys
 import time
+import atexit
 from typing import List, Optional, Tuple, Dict, Any
 
 from braidinfer import ChunkedLLM, ChunkType, SamplingParams
@@ -59,15 +60,27 @@ class ChunkedFastChat:
 
         # Set up signal handler for graceful exit
         signal.signal(signal.SIGINT, self._signal_handler)
+        atexit.register(self._cleanup_terminal)
         
         # Set default system prompt with language hint
         self._set_system_prompt("You are a helpful AI assistant. Please respond in English.")
     
+    def _cleanup_terminal(self):
+        """Restore terminal state."""
+        try:
+            # Reset terminal to normal state
+            sys.stdout.write('\033[0m')  # Reset all formatting
+            sys.stdout.write('\033[?25h')  # Show cursor
+            sys.stdout.flush()
+        except:
+            pass
+
     def _signal_handler(self, signum, frame):
         """Handle Ctrl-C signal for graceful exit."""
         print("\n\nReceived interrupt signal. Exiting gracefully...")
         self.should_exit = True
-        os._exit(0)
+        self._cleanup_terminal()
+        sys.exit(0)
 
     def _set_system_prompt(self, prompt: str):
         """Set or update the system prompt chunk."""
@@ -76,16 +89,8 @@ class ChunkedFastChat:
             # Old one may still be cached for other conversations
             pass
         
-        # Format system prompt using the model's chat template
-        messages = [{"role": "system", "content": prompt}]
-        formatted_system_prompt = self.llm.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=False
-        )
-        
         self.system_chunk_id = self.llm.register_chunk(
-            formatted_system_prompt,
+            prompt,
             ChunkType.SYSTEM_PROMPT,
             metadata={"role": "system", "timestamp": time.time()}
         )
@@ -132,17 +137,9 @@ class ChunkedFastChat:
         # Get context from previous turns.
         context_chunk_ids = self._build_context_chunks()
 
-        # Format the user's input using the chat template for consistency
-        messages = [{"role": "user", "content": user_input}]
-        formatted_user_input = self.llm.tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=False  # The engine handles the generation prompt
-        )
-        
         # The user's input is the new query.
         query_chunk_id = self.llm.register_chunk(
-            formatted_user_input,
+            user_input,
             ChunkType.QUERY,
             metadata={"role": "user", "timestamp": time.time()}
         )
@@ -196,25 +193,17 @@ class ChunkedFastChat:
             # Filter think tags for conversation history
             filtered_text = self._filter_think_tags(generated_text)
 
-            # Add user's message to history using the chat template
-            user_messages = [{"role": "user", "content": user_input}]
-            formatted_user_context = self.llm.tokenizer.apply_chat_template(
-                user_messages, tokenize=False, add_generation_prompt=False
-            )
+            # Add user's message to history
             user_context_chunk_id = self.llm.register_chunk(
-                formatted_user_context,
+                user_input,
                 ChunkType.CONTEXT,
                 metadata={"role": "user", "timestamp": time.time()}
             )
             self.conversation_chunk_ids.append(("user", user_context_chunk_id))
             
-            # Register assistant response as a chunk using the chat template
-            assistant_messages = [{"role": "assistant", "content": filtered_text}]
-            formatted_assistant_response = self.llm.tokenizer.apply_chat_template(
-                assistant_messages, tokenize=False, add_generation_prompt=False
-            )
+            # Register assistant response as a chunk
             assistant_chunk_id = self.llm.register_chunk(
-                formatted_assistant_response,
+                filtered_text,
                 ChunkType.CONTEXT,
                 metadata={"role": "assistant", "timestamp": time.time()}
             )
@@ -324,6 +313,7 @@ class ChunkedFastChat:
                 # Check for commands
                 if user_input.lower() in ['exit', 'quit', 'q']:
                     print("Goodbye!")
+                    self._cleanup_terminal()
                     break
                 elif user_input.lower() == '/stats':
                     self.print_stats()
@@ -352,10 +342,12 @@ class ChunkedFastChat:
             except KeyboardInterrupt:
                 # Ctrl-C during input - exit gracefully
                 print("\nGoodbye!")
+                self._cleanup_terminal()
                 break
             except EOFError:
                 # Ctrl-D or EOF - exit gracefully
                 print("\nGoodbye!")
+                self._cleanup_terminal()
                 break
             except Exception as e:
                 print(f"\nError: {e}")

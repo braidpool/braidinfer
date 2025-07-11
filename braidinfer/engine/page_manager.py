@@ -163,68 +163,26 @@ class PageManager:
                           sequences: List[Sequence],
                           is_prefill: bool = False):
         """Append K/V values to the cache for given sequences."""
-        if is_prefill:
-            # For prefill, build batch indices and positions
-            seq_lens = []
-            actual_token_lens = []  # Track actual tokens being processed vs full context
-            
-            for seq in sequences:
-                # For chunked sequences, distinguish between full context and current tokens
-                if hasattr(seq, '_full_context_length'):
-                    # This sequence includes chunked context - use full length for indexing
-                    seq_lens.append(seq._full_context_length)
-                    # But the actual K/V tensors only contain the generation prompt tokens
-                    actual_token_lens.append(len(seq))
-                else:
-                    # Regular sequence - use normal length for both
-                    seq_lens.append(len(seq))
-                    actual_token_lens.append(len(seq))
-            
-            total_tokens = sum(seq_lens)
-            actual_total_tokens = sum(actual_token_lens)
-            
-            # Validate K/V shapes
-            # For chunked sequences, K/V shapes match actual tokens being processed, not full context
-            expected_tokens = actual_total_tokens if any(hasattr(seq, '_full_context_length') for seq in sequences) else total_tokens
-            assert k.shape[0] == expected_tokens, f"K shape mismatch: {k.shape[0]} != {expected_tokens} (seq_lens={seq_lens}, actual_lens={actual_token_lens})"
-            assert v.shape[0] == expected_tokens, f"V shape mismatch: {v.shape[0]} != {expected_tokens}"
-            
-            # Build q_indptr for batch positions
-            q_indptr = torch.tensor([0] + [sum(seq_lens[:i+1]) for i in range(len(sequences))],
-                                   dtype=torch.int32, device="cuda")
-            
-            # Build batch indices and positions manually
-            # This replaces flashinfer.page.get_batch_indices_positions
-            batch_indices = []
-            positions = []
-            for seq_idx, seq_len in enumerate(seq_lens):
-                batch_indices.extend([seq_idx] * seq_len)
-                positions.extend(list(range(seq_len)))
-            
-            batch_indices = torch.tensor(batch_indices, dtype=torch.int32, device="cuda")
-            positions = torch.tensor(positions, dtype=torch.int32, device="cuda")
-        else:
-            # For decode, one token per sequence
-            batch_size = len(sequences)
-            batch_indices = torch.arange(batch_size, dtype=torch.int32, device="cuda")
-            positions = torch.tensor([self.seq_lengths[seq.seq_id] for seq in sequences],
-                                   dtype=torch.int32, device="cuda")
+        layer_cache = self.kv_cache[layer_idx]
         
         # Get indices for this batch
         kv_indices, kv_indptr, last_page_lens = self.build_indices_for_sequences(
             sequences, for_prefill=is_prefill
         )
+
+        # For prefill, the k, v tensors contain the values for the new tokens.
+        # The number of tokens is simply the first dimension of the k tensor.
+        num_tokens_to_append = k.shape[0]
         
-        # Append to cache
-        layer_cache = self.kv_cache[layer_idx]
-        
-        # Always use custom KV cache implementation (FlashInfer removed)
-        from braidinfer.kernels.kv_cache_utils import append_to_paged_kv_cache_custom
-        
-        # Process each sequence separately for correctness
+        # This method currently only supports single-sequence prefill.
+        if is_prefill and len(sequences) > 1:
+            raise NotImplementedError("Batched prefill with chunking is not yet supported.")
+
+        # The logic inside this loop assumes a single sequence for prefill.
         token_offset = 0
         for seq_idx, seq in enumerate(sequences):
-            seq_len = len(seq) if is_prefill else 1
+            # For prefill, seq_len is the number of new tokens. For decode, it's 1.
+            seq_len = num_tokens_to_append if is_prefill else 1
             
             # Get the KV indices for this sequence
             start_idx = kv_indptr[seq_idx].item()
@@ -237,14 +195,13 @@ class PageManager:
             
             # Get positions for this sequence - need to account for existing KV cache
             current_kv_len = self.seq_lengths.get(seq.seq_id, 0)
-            if is_prefill:
-                # For prefill, positions start from current KV cache length
-                seq_positions = torch.arange(current_kv_len, current_kv_len + seq_len, dtype=torch.int32, device="cuda")
-            else:
-                # For decode, position is the current KV cache length
-                seq_positions = torch.tensor([current_kv_len], dtype=torch.int32, device="cuda")
+            
+            # For prefill of new tokens, positions start from the end of the cached tokens.
+            # For decode, the position is also the current length.
+            seq_positions = torch.arange(current_kv_len, current_kv_len + seq_len, dtype=torch.int32, device="cuda")
             
             # Append for this sequence
+            from braidinfer.kernels.kv_cache_utils import append_to_paged_kv_cache_custom
             append_to_paged_kv_cache_custom(
                 k=seq_k,
                 v=seq_v,

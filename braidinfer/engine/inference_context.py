@@ -48,6 +48,9 @@ class InferenceContext:
     # Global KV cache reference for custom chunk attention
     kv_cache: Optional[torch.Tensor] = None
     
+    # Positions tensor for the current batch
+    positions: Optional[torch.Tensor] = None
+    
     def get_wrapper(self, layer_idx: int = None):
         """Get the wrapper. Layer index is ignored since we use a single wrapper."""
         return self.wrapper
